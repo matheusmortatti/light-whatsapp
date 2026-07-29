@@ -49,4 +49,5 @@ bin/
 ### Python (builder/) ###
 __pycache__/
 *.py[cod]
-.pytest_cache/
+.pytest_cache/core/core
+*.exe
