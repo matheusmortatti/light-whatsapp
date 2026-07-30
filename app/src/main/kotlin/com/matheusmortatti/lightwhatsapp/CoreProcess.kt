@@ -73,7 +73,12 @@ class CoreProcess(private val context: Context) {
         // Human-readable logs go to stderr (see core/main.go) — just surface
         // them in logcat, they're not part of the event protocol.
         val stderrThread = Thread({
-            process.errorStream.bufferedReader().forEachLine { Log.d(TAG, it) }
+            try {
+                process.errorStream.bufferedReader().forEachLine { Log.d(TAG, it) }
+            } catch (e: IOException) {
+                // Expected when awaitClose interrupts this thread to unblock
+                // the read during teardown — not an error.
+            }
         }, "core-stderr").apply { isDaemon = true; start() }
 
         val stdoutThread = Thread({
@@ -81,6 +86,9 @@ class CoreProcess(private val context: Context) {
                 process.inputStream.bufferedReader().forEachLine { line ->
                     parseEvent(line)?.let { trySend(it) }
                 }
+            } catch (e: IOException) {
+                // Expected when awaitClose interrupts this thread to unblock
+                // the read during teardown — not an error.
             } finally {
                 close()
             }

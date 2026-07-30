@@ -5,11 +5,14 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -18,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
@@ -114,6 +118,8 @@ fun LightTextInputEditor(
     val colors = LightThemeTokens.colors
     val inputStyle = lightInputTextStyle()
     var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val scrollState = rememberScrollState()
+    var viewportHeightPx by remember { mutableStateOf(0) }
 
     Surface {
         Column(modifier = modifier.fillMaxSize()) {
@@ -135,6 +141,8 @@ fun LightTextInputEditor(
                     .weight(1f)
                     .fillMaxWidth()
                     .padding(horizontal = 2f.gridUnitsAsDp())
+                    .onSizeChanged { viewportHeightPx = it.height }
+                    .verticalScroll(scrollState)
                     .pointerInput(Unit) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
@@ -189,6 +197,23 @@ fun LightTextInputEditor(
                             .height(with(LocalDensity.current) { rect.height.toDp() })
                             .background(colors.content),
                     )
+                }
+            }
+
+            // Keep the cursor visible as the user types past the bottom (or
+            // moves selection past the top) of the input's visible area.
+            LaunchedEffect(textLayout, state.selection, viewportHeightPx) {
+                val layout = textLayout ?: return@LaunchedEffect
+                if (viewportHeightPx <= 0) return@LaunchedEffect
+                val cursorPos = state.selection.min.coerceIn(0, layout.layoutInput.text.length)
+                val rect = layout.getCursorRect(cursorPos)
+                val visibleTop = scrollState.value
+                val visibleBottom = visibleTop + viewportHeightPx
+                when {
+                    rect.bottom > visibleBottom ->
+                        scrollState.scrollTo((rect.bottom - viewportHeightPx).toInt().coerceAtLeast(0))
+                    rect.top < visibleTop ->
+                        scrollState.scrollTo(rect.top.toInt().coerceAtLeast(0))
                 }
             }
 

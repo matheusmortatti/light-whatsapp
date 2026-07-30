@@ -256,15 +256,14 @@ private fun ChatListScreen(chats: List<Chat>, onChatClick: (Chat) -> Unit) {
             LightScrollView(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 32.dp),
+                    .fillMaxWidth(),
             ) {
                 filteredChats.forEach { chat ->
                     ChatRow(
                         chat = chat,
                         modifier = Modifier
                             .lightClickable { onChatClick(chat) }
-                            .padding(vertical = 12.dp),
+                            .padding(horizontal = 32.dp, vertical = 12.dp),
                     )
                 }
             }
@@ -422,15 +421,14 @@ private fun ChatDetailScreen(
             LightScrollView(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp),
+                    .fillMaxWidth(),
                 scrollState = scrollState,
             ) {
                 messages.forEach { message ->
                     MessageRow(
                         message = message,
                         isGroup = chat.isGroup,
-                        modifier = Modifier.padding(vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
                     )
                 }
             }
