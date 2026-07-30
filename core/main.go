@@ -23,7 +23,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -263,6 +265,63 @@ func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMes
 	return "", "", nil, false
 }
 
+// mentionPattern matches WhatsApp's raw @-mention syntax embedded directly in
+// message text: "@" followed by the mentioned JID's bare user part (digits
+// only, no "+", no domain). Resolved at emit time (see resolveMentionsInList)
+// rather than baked into the cached Text at ingest time, so a message cached
+// by an older build (raw number, no resolution logic yet) still resolves
+// correctly today — the source of truth is the text itself, not a
+// separately-persisted mention list.
+var mentionPattern = regexp.MustCompile(`@(\d{5,15})\b`)
+
+// resolveMentions rewrites each "@<number>" mention in text into "@<display
+// name>", using the same contact-store lookup as chat names. The number is
+// the mentioned user's bare JID user part, but *not* necessarily a phone
+// number: WhatsApp mentions people by their privacy-preserving "LID" (a
+// per-account opaque ID, server "lid") rather than their phone number
+// (server "s.whatsapp.net") wherever LID addressing is in effect for the
+// chat, so LID is tried first — confirmed via the local contact store
+// (`whatsmeow_contacts`, keyed by the full "<id>@lid" JID, PushName field)
+// rather than assumed. Falls back to the phone-number JID, then to the
+// device's own push name for a self-mention (neither JID form necessarily
+// has a contact-store row for yourself). Left as-is (raw number) if no name
+// is known yet.
+func resolveMentions(ctx context.Context, client *whatsmeow.Client, text string) string {
+	if !strings.Contains(text, "@") {
+		return text
+	}
+	return mentionPattern.ReplaceAllStringFunc(text, func(match string) string {
+		user := match[1:]
+		if name := contactName(ctx, client, types.NewJID(user, types.HiddenUserServer)); name != "" {
+			return "@" + name
+		}
+		if name := contactName(ctx, client, types.NewJID(user, types.DefaultUserServer)); name != "" {
+			return "@" + name
+		}
+		if client.Store.PushName != "" && ((client.Store.ID != nil && user == client.Store.ID.User) || user == client.Store.GetLID().User) {
+			return "@" + client.Store.PushName
+		}
+		return match
+	})
+}
+
+// resolveMentionsInList returns a copy of list with each message's mentions
+// resolved to display names (see resolveMentions) — a copy so the underlying
+// cache keeps the raw, unresolved text (resolution depends on contact-store
+// state that can improve over time, so it's redone on every emit rather than
+// baked in once).
+func resolveMentionsInList(ctx context.Context, client *whatsmeow.Client, list []chatMessage) []chatMessage {
+	if len(list) == 0 {
+		return list
+	}
+	out := make([]chatMessage, len(list))
+	for i, m := range list {
+		m.Text = resolveMentions(ctx, client, m.Text)
+		out[i] = m
+	}
+	return out
+}
+
 // setImageFields fills in cm's persisted download reference from img, so
 // downloadImage can (re)fetch it later — including from a process started
 // after the one that originally saw this message, since these fields ride
@@ -389,7 +448,7 @@ func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	messagesMu.Unlock()
 
 	if ok {
-		emit(event{Type: "messages", JID: jid, Messages: list})
+		emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
 	}
 }
 
@@ -413,7 +472,7 @@ func handleOpenChat(ctx context.Context, client *whatsmeow.Client, logger waLog.
 	messagesMu.Unlock()
 
 	logger.Debugf("open_chat %s: %d cached messages, %d images to download", jid, len(list), len(toDownload))
-	emit(event{Type: "messages", JID: jid, Messages: list})
+	emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
 
 	for _, m := range toDownload {
 		go downloadImage(ctx, client, logger, messages, jid, m)
@@ -579,7 +638,7 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	msgList := upsertMessage(messages, jid.String(), cm)
 	messagesMu.Unlock()
 
-	emit(event{Type: "messages", JID: jid.String(), Messages: msgList})
+	emit(event{Type: "messages", JID: jid.String(), Messages: resolveMentionsInList(ctx, client, msgList)})
 
 	if msgType == "image" && img != nil {
 		go downloadImage(ctx, client, logger, messages, jid.String(), cm)
