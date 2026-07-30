@@ -556,6 +556,54 @@ func readCommands(ctx context.Context, client *whatsmeow.Client, logger waLog.Lo
 	}
 }
 
+// isJunkChatJID reports whether jid is one of the garbage conversation IDs
+// WhatsApp's history sync occasionally includes (e.g. "0@s.whatsapp.net")
+// that don't correspond to any real chat and would otherwise surface as a
+// chat literally named "0".
+func isJunkChatJID(jid types.JID) bool {
+	return jid.User == "" || jid.User == "0"
+}
+
+// canonicalizeChatJID collapses the "me" conversation onto a single stable
+// key. WhatsApp reports the self-chat under whichever addressing mode is
+// active for a given sync chunk or event — the phone-number JID or the LID
+// — so without this the same conversation forks into two chat-list entries,
+// one of which never gets the message backfill the other did.
+func canonicalizeChatJID(client *whatsmeow.Client, jid types.JID) types.JID {
+	ownID := client.Store.GetJID().ToNonAD()
+	ownLID := client.Store.GetLID().ToNonAD()
+	if ownID.IsEmpty() || ownLID.IsEmpty() {
+		return jid
+	}
+	if jid.ToNonAD() == ownLID {
+		return ownID
+	}
+	return jid
+}
+
+// sanitizeChats cleans up a chat map loaded from disk: dropping junk entries
+// (see isJunkChatJID) and merging any duplicate "me" chat left over from
+// before canonicalizeChatJID existed into a single entry, keeping whichever
+// side has the newer timestamp.
+func sanitizeChats(client *whatsmeow.Client, chats map[string]chatSummary) {
+	for jidStr, c := range chats {
+		jid, err := types.ParseJID(jidStr)
+		if err != nil || isJunkChatJID(jid) {
+			delete(chats, jidStr)
+			continue
+		}
+		canonical := canonicalizeChatJID(client, jid)
+		if canonical.String() == jidStr {
+			continue
+		}
+		delete(chats, jidStr)
+		if merged, ok := chats[canonical.String()]; !ok || c.Timestamp > merged.Timestamp {
+			c.JID = canonical.String()
+			chats[canonical.String()] = c
+		}
+	}
+}
+
 // handleHistorySync folds one history-sync chunk's conversations into chats
 // and emits the updated snapshot. WhatsApp sends this in multiple chunks
 // (bootstrap, recent, push-name, ...) so this is called once per chunk and
@@ -569,9 +617,10 @@ func handleHistorySync(ctx context.Context, client *whatsmeow.Client, hs *events
 	chatsMu.Lock()
 	for _, conv := range convs {
 		jid, err := types.ParseJID(conv.GetID())
-		if err != nil || jid.Server == types.BroadcastServer {
+		if err != nil || jid.Server == types.BroadcastServer || isJunkChatJID(jid) {
 			continue
 		}
+		jid = canonicalizeChatJID(client, jid)
 
 		// Merge into whatever's already known for this JID rather than
 		// overwriting it: WhatsApp sends multiple sync chunks per JID
@@ -638,9 +687,10 @@ func handleHistorySync(ctx context.Context, client *whatsmeow.Client, hs *events
 // time so eager downloading is cheap.
 func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, evt *events.Message, chats map[string]chatSummary, messages map[string][]chatMessage) {
 	jid := evt.Info.Chat
-	if jid.Server == types.BroadcastServer {
+	if jid.Server == types.BroadcastServer || isJunkChatJID(jid) {
 		return
 	}
+	jid = canonicalizeChatJID(client, jid)
 	timestamp := evt.Info.Timestamp.Unix()
 
 	chatsMu.Lock()
@@ -849,6 +899,7 @@ func main() {
 	messages := make(map[string][]chatMessage)
 
 	client := whatsmeow.NewClient(deviceStore, logger)
+	sanitizeChats(client, chats)
 
 	// Contact names (address-book sync, push names) often arrive after a
 	// chat was first cached, so a chat can get stuck showing the raw phone
