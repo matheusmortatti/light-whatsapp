@@ -90,12 +90,21 @@ class CoreProcess(private val context: Context) {
 
     /**
      * Sends an "open_chat" command to core's stdin, asking it to (re-)emit
-     * the given chat's messages — see core/main.go's readCommands/handleOpenChat.
-     * A no-op if the subprocess isn't running (events() not collected yet, or
-     * already torn down).
+     * the given chat's messages and mark it read — see core/main.go's
+     * readCommands/handleOpenChat. A no-op if the subprocess isn't running
+     * (events() not collected yet, or already torn down).
      */
     fun openChat(jid: String) {
         writeCommand(JSONObject().put("type", "open_chat").put("jid", jid))
+    }
+
+    /**
+     * Sends a "close_chat" command to core's stdin, telling it the app has
+     * navigated away from the given chat — see core/main.go's
+     * readCommands/openChatJID. A no-op if the subprocess isn't running.
+     */
+    fun closeChat(jid: String) {
+        writeCommand(JSONObject().put("type", "close_chat").put("jid", jid))
     }
 
     /**

@@ -82,6 +82,7 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
 
     /** Returns to the chat list. */
     fun closeChat() {
+        _selectedChat.value?.let { coreProcess.closeChat(it.jid) }
         _selectedChat.value = null
         _messages.value = emptyList()
     }

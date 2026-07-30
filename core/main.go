@@ -72,7 +72,9 @@ type event struct {
 
 // command is one line of the stdin protocol: the app asking core for
 // something — "open_chat" to fetch (and start filling in images for) one
-// conversation's messages, or "send_message" to send a text message to a jid.
+// conversation's messages and mark it read, "close_chat" to tell core the
+// app navigated away (see openChatJID), or "send_message" to send a text
+// message to a jid.
 type command struct {
 	Type string `json:"type"`
 	JID  string `json:"jid,omitempty"`
@@ -125,6 +127,35 @@ var emitMu sync.Mutex
 // dedicated history-sync goroutine, while fetchGroupNames runs on whatever
 // goroutine dispatches *events.Connected — both mutate the same map.
 var chatsMu sync.Mutex
+
+// openChatJID is the chat the app currently has on screen, set by
+// handleOpenChat and cleared by a "close_chat" command (see readCommands).
+// handleMessage consults it so a live message for the chat the user is
+// actively looking at doesn't bump its unread count.
+var (
+	openChatMu  sync.Mutex
+	openChatJID string
+)
+
+func setOpenChatJID(jid string) {
+	openChatMu.Lock()
+	openChatJID = jid
+	openChatMu.Unlock()
+}
+
+func clearOpenChatJID(jid string) {
+	openChatMu.Lock()
+	if openChatJID == jid {
+		openChatJID = ""
+	}
+	openChatMu.Unlock()
+}
+
+func isOpenChatJID(jid string) bool {
+	openChatMu.Lock()
+	defer openChatMu.Unlock()
+	return openChatJID == jid
+}
 
 func emit(e event) {
 	emitMu.Lock()
@@ -454,11 +485,88 @@ func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 }
 
+// markChatRead sends WhatsApp read receipts for every not-from-me message in
+// list, so the sender sees the chat as read the same way a phone client
+// would. Receipts must be grouped by sender (MarkRead's requirement — see
+// whatsmeow/receipt.go), which only matters for groups: 1:1 chats have a
+// single implicit sender and an empty types.JID is passed instead.
+func markChatRead(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, jid types.JID, list []chatMessage) {
+	bySender := make(map[string][]string)
+	for _, m := range list {
+		if m.FromMe {
+			continue
+		}
+		bySender[m.Sender] = append(bySender[m.Sender], m.ID)
+	}
+	for senderStr, ids := range bySender {
+		sender := types.EmptyJID
+		if senderStr != "" {
+			parsed, err := types.ParseJID(senderStr)
+			if err != nil {
+				continue
+			}
+			sender = parsed
+		}
+		if err := client.MarkRead(ctx, ids, time.Now(), jid, sender); err != nil {
+			logger.Warnf("failed to mark %d message(s) read in %s: %v", len(ids), jid, err)
+		}
+	}
+}
+
+// unreadTail returns the last count not-from-me messages in list (oldest
+// first, same as list itself), walking backward from the newest message —
+// i.e. the actual unread messages, per chats[jid].UnreadCount, rather than
+// the whole cached scrollback. Without this, reopening a long-running chat
+// would resend read receipts for its entire history every single time.
+func unreadTail(list []chatMessage, count int) []chatMessage {
+	if count <= 0 {
+		return nil
+	}
+	out := make([]chatMessage, 0, count)
+	for i := len(list) - 1; i >= 0 && len(out) < count; i-- {
+		if !list[i].FromMe {
+			out = append(out, list[i])
+		}
+	}
+	return out
+}
+
+// markChatReadAndClearUnread marks the chat's actually-unread messages read
+// (see unreadTail) and, if its unread count was nonzero, resets it to 0 and
+// emits the updated chat list. Meant to run in its own goroutine — the read
+// receipt is a network call.
+func markChatReadAndClearUnread(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, jidStr string, list []chatMessage, chats map[string]chatSummary) {
+	jid, err := types.ParseJID(jidStr)
+	if err != nil {
+		return
+	}
+
+	chatsMu.Lock()
+	c, ok := chats[jidStr]
+	if !ok || c.UnreadCount == 0 {
+		chatsMu.Unlock()
+		return
+	}
+	unreadCount := c.UnreadCount
+	c.UnreadCount = 0
+	chats[jidStr] = c
+	updated := saveChats(chats)
+	chatsMu.Unlock()
+
+	markChatRead(ctx, client, logger, jid, unreadTail(list, unreadCount))
+	emit(event{Type: "chats", Chats: updated})
+}
+
 // handleOpenChat responds to the app requesting one chat's messages: emits
 // what's already known (from history sync and/or prior live messages)
 // immediately, then downloads any images in that batch that haven't been
-// fetched yet, re-emitting the chat once each one lands.
-func handleOpenChat(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, jid string, messages map[string][]chatMessage) {
+// fetched yet, re-emitting the chat once each one lands. Also marks the chat
+// read (see markChatReadAndClearUnread) and records it as the currently
+// open chat (see openChatJID) so a live message arriving while it's open
+// doesn't bump its unread count back up.
+func handleOpenChat(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, jid string, chats map[string]chatSummary, messages map[string][]chatMessage) {
+	setOpenChatJID(jid)
+
 	messagesMu.Lock()
 	list, ok := messages[jid]
 	if !ok {
@@ -475,6 +583,8 @@ func handleOpenChat(ctx context.Context, client *whatsmeow.Client, logger waLog.
 
 	logger.Debugf("open_chat %s: %d cached messages, %d images to download", jid, len(list), len(toDownload))
 	emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
+
+	go markChatReadAndClearUnread(ctx, client, logger, jid, list, chats)
 
 	for _, m := range toDownload {
 		go downloadImage(ctx, client, logger, messages, jid, m)
@@ -541,7 +651,11 @@ func readCommands(ctx context.Context, client *whatsmeow.Client, logger waLog.Lo
 		switch cmd.Type {
 		case "open_chat":
 			if cmd.JID != "" {
-				go handleOpenChat(ctx, client, logger, cmd.JID, messages)
+				go handleOpenChat(ctx, client, logger, cmd.JID, chats, messages)
+			}
+		case "close_chat":
+			if cmd.JID != "" {
+				clearOpenChatJID(cmd.JID)
 			}
 		case "send_message":
 			if cmd.JID != "" && cmd.Text != "" {
@@ -692,6 +806,9 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 	jid = canonicalizeChatJID(client, jid)
 	timestamp := evt.Info.Timestamp.Unix()
+	// Suppress the unread bump for the chat currently on screen — the app
+	// is showing this message as it arrives, so it's already "read".
+	isOpen := isOpenChatJID(jid.String())
 
 	chatsMu.Lock()
 	c, ok := chats[jid.String()]
@@ -708,12 +825,19 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	bumped := timestamp > c.Timestamp
 	if bumped {
 		c.Timestamp = timestamp
+	}
+	unread := !evt.Info.IsFromMe && !isOpen
+	if unread {
+		c.UnreadCount++
+	}
+	changed := bumped || unread || !ok
+	if changed {
 		chats[jid.String()] = c
 	}
 	list := saveChats(chats)
 	chatsMu.Unlock()
 
-	if bumped {
+	if changed {
 		emit(event{Type: "chats", Chats: list})
 	}
 
@@ -741,6 +865,10 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	messagesMu.Unlock()
 
 	emit(event{Type: "messages", JID: jid.String(), Messages: resolveMentionsInList(ctx, client, msgList)})
+
+	if !evt.Info.IsFromMe && isOpen {
+		go markChatRead(ctx, client, logger, jid, []chatMessage{cm})
+	}
 
 	if msgType == "image" && img != nil {
 		go downloadImage(ctx, client, logger, messages, jid.String(), cm)
