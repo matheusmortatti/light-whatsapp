@@ -878,19 +878,29 @@ func isJunkChatJID(jid types.JID) bool {
 	return jid.User == "" || jid.User == "0"
 }
 
-// canonicalizeChatJID collapses the "me" conversation onto a single stable
-// key. WhatsApp reports the self-chat under whichever addressing mode is
-// active for a given sync chunk or event — the phone-number JID or the LID
-// — so without this the same conversation forks into two chat-list entries,
-// one of which never gets the message backfill the other did.
-func canonicalizeChatJID(client *whatsmeow.Client, jid types.JID) types.JID {
-	ownID := client.Store.GetJID().ToNonAD()
-	ownLID := client.Store.GetLID().ToNonAD()
-	if ownID.IsEmpty() || ownLID.IsEmpty() {
+// canonicalizeChatJID collapses a contact's LID and phone-number JIDs onto a
+// single stable key. WhatsApp addresses the same conversation under
+// whichever mode is active for a given sync chunk or event — sometimes the
+// phone-number JID, sometimes the opaque @lid — so without this the same
+// person forks into two chat-list entries with two different names (the
+// phone's address-book name on the PN-keyed one, their self-set WhatsApp
+// name on the LID-keyed one). The phone-number JID is always chosen as
+// canonical so the address-book name (see contactName) wins.
+func canonicalizeChatJID(ctx context.Context, client *whatsmeow.Client, jid types.JID) types.JID {
+	if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer {
 		return jid
 	}
-	if jid.ToNonAD() == ownLID {
+
+	ownID := client.Store.GetJID().ToNonAD()
+	ownLID := client.Store.GetLID().ToNonAD()
+	if !ownID.IsEmpty() && !ownLID.IsEmpty() && jid.ToNonAD() == ownLID {
 		return ownID
+	}
+
+	if jid.Server == types.HiddenUserServer {
+		if pn, err := client.Store.LIDs.GetPNForLID(ctx, jid.ToNonAD()); err == nil && !pn.IsEmpty() {
+			return pn
+		}
 	}
 	return jid
 }
@@ -899,14 +909,14 @@ func canonicalizeChatJID(client *whatsmeow.Client, jid types.JID) types.JID {
 // (see isJunkChatJID) and merging any duplicate "me" chat left over from
 // before canonicalizeChatJID existed into a single entry, keeping whichever
 // side has the newer timestamp.
-func sanitizeChats(client *whatsmeow.Client, chats map[string]chatSummary) {
+func sanitizeChats(ctx context.Context, client *whatsmeow.Client, chats map[string]chatSummary) {
 	for jidStr, c := range chats {
 		jid, err := types.ParseJID(jidStr)
 		if err != nil || isJunkChatJID(jid) {
 			delete(chats, jidStr)
 			continue
 		}
-		canonical := canonicalizeChatJID(client, jid)
+		canonical := canonicalizeChatJID(ctx, client, jid)
 		if canonical.String() == jidStr {
 			continue
 		}
@@ -934,7 +944,7 @@ func handleHistorySync(ctx context.Context, client *whatsmeow.Client, hs *events
 		if err != nil || jid.Server == types.BroadcastServer || isJunkChatJID(jid) {
 			continue
 		}
-		jid = canonicalizeChatJID(client, jid)
+		jid = canonicalizeChatJID(ctx, client, jid)
 
 		// Merge into whatever's already known for this JID rather than
 		// overwriting it: WhatsApp sends multiple sync chunks per JID
@@ -1004,7 +1014,7 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	if jid.Server == types.BroadcastServer || isJunkChatJID(jid) {
 		return
 	}
-	jid = canonicalizeChatJID(client, jid)
+	jid = canonicalizeChatJID(ctx, client, jid)
 	timestamp := evt.Info.Timestamp.Unix()
 	// Suppress the unread bump for the chat currently on screen — the app
 	// is showing this message as it arrives, so it's already "read".
@@ -1133,6 +1143,7 @@ func refreshContactName(ctx context.Context, client *whatsmeow.Client, jid types
 	if jid.Server == types.GroupServer {
 		return
 	}
+	jid = canonicalizeChatJID(ctx, client, jid)
 	name := contactName(ctx, client, jid)
 	if name == "" {
 		return
@@ -1233,7 +1244,7 @@ func main() {
 	messages := make(map[string][]chatMessage)
 
 	client := whatsmeow.NewClient(deviceStore, logger)
-	sanitizeChats(client, chats)
+	sanitizeChats(ctx, client, chats)
 
 	// Contact names (address-book sync, push names) often arrive after a
 	// chat was first cached, so a chat can get stuck showing the raw phone
