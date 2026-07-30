@@ -29,20 +29,61 @@ sealed class LoginState {
  */
 class QrLoginViewModel(application: Application) : AndroidViewModel(application) {
 
+    // A single instance, kept for this ViewModel's lifetime: openChat() needs
+    // to reach the same running subprocess that events() is collecting from.
+    private val coreProcess = CoreProcess(application)
+
     private val _state = MutableStateFlow<LoginState>(LoginState.Idle)
     val state: StateFlow<LoginState> = _state.asStateFlow()
 
+    // Chats can arrive before "connected" (core replays a cached list from a
+    // prior run on startup) and keep arriving in chunks after, so it's kept
+    // separate from LoginState rather than nested inside Connected.
+    private val _chats = MutableStateFlow<List<Chat>>(emptyList())
+    val chats: StateFlow<List<Chat>> = _chats.asStateFlow()
+
+    // The chat currently open for viewing, or null when showing the chat list.
+    private val _selectedChat = MutableStateFlow<Chat?>(null)
+    val selectedChat: StateFlow<Chat?> = _selectedChat.asStateFlow()
+
+    private val _messages = MutableStateFlow<List<Message>>(emptyList())
+    val messages: StateFlow<List<Message>> = _messages.asStateFlow()
+
     init {
         viewModelScope.launch {
-            CoreProcess(getApplication()).events().collect { event ->
-                _state.value = when (event) {
-                    is CoreEvent.Qr -> LoginState.ShowingQr(encodeQr(event.code))
-                    is CoreEvent.Connected -> LoginState.Connected(event.jid)
-                    is CoreEvent.LoggedOut -> LoginState.Idle
-                    is CoreEvent.Error -> LoginState.Error(event.message)
+            coreProcess.events().collect { event ->
+                when (event) {
+                    is CoreEvent.Qr -> _state.value = LoginState.ShowingQr(encodeQr(event.code))
+                    is CoreEvent.Connected -> _state.value = LoginState.Connected(event.jid)
+                    is CoreEvent.LoggedOut -> {
+                        _state.value = LoginState.Idle
+                        _chats.value = emptyList()
+                        _selectedChat.value = null
+                        _messages.value = emptyList()
+                    }
+                    is CoreEvent.Error -> _state.value = LoginState.Error(event.message)
+                    is CoreEvent.Chats -> _chats.value = event.chats
+                    is CoreEvent.Messages -> {
+                        if (event.jid == _selectedChat.value?.jid) {
+                            _messages.value = event.messages
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /** Opens a chat for viewing: clears any previously shown messages and asks core to (re-)send this one's. */
+    fun openChat(chat: Chat) {
+        _selectedChat.value = chat
+        _messages.value = emptyList()
+        coreProcess.openChat(chat.jid)
+    }
+
+    /** Returns to the chat list. */
+    fun closeChat() {
+        _selectedChat.value = null
+        _messages.value = emptyList()
     }
 
     private fun encodeQr(text: String, size: Int = 512): ImageBitmap {

@@ -105,16 +105,100 @@ app/ (Kotlin, Compose, plain Android app)  <-- stdout JSON events -->  core/ (Go
   (bundled as `app/src/main/jniLibs/arm64-v8a/libwhatsmeowcore.so` so
   Android extracts it to disk as an executable "native lib"), reads its
   stdout JSON-event protocol, and renders a QR-login screen using `sdk/ui`
-  Compose components. Currently QR-login only, subprocess lifetime scoped
-  to the Activity — no persistent foreground service yet.
+  Compose components. Once connected, shows a chat list (name, unread
+  count) fed by a `"chats"` stdout event; tapping a chat opens a thread view
+  (text + images, sender names in groups) fed by a `"messages"` event — no
+  sending yet, and subprocess lifetime is still scoped to the Activity, no
+  persistent foreground service.
+  - **Chat viewing (2026-07-29)**: the stdout-only protocol became
+    bidirectional to support this — `app/` writes `{"type":"open_chat",
+    "jid":...}` lines to `core/`'s stdin (`readCommands` in `core/main.go`),
+    which replies with a `"messages"` event for that chat. Text messages
+    (`Conversation`/`ExtendedTextMessage`, unwrapping
+    `Ephemeral`/`ViewOnce`/`ViewOnceV2` wrappers first) and image messages
+    are extracted from both history-sync conversations and live
+    `*events.Message`; everything else (video, audio, documents, stickers,
+    polls, location, reactions, ...) is dropped during extraction, per the
+    app's scope. Images download lazily — on `open_chat`, or immediately for
+    a live incoming message — rather than eagerly for a whole history sync,
+    which can carry years of backlog. Verified end-to-end on the LightOS
+    emulator (2026-07-29): a fresh QR re-link's history sync produced real
+    per-chat message backlog (e.g. 41 messages/9 images in one group),
+    rendered correctly with sender names and chronological order; a live
+    incoming photo downloaded and rendered full-res, right-aligned as
+    from-me.
+  - **Image-download bug found and fixed the same day**: the first cut kept
+    each undownloaded image's decryption info (direct path, media key,
+    hashes) in an in-memory-only map, separate from the persisted message
+    cache. Any process restart between seeing an image (history sync or a
+    live message) and the user opening that chat — normal, given the
+    Activity-scoped subprocess lifetime — silently and permanently
+    stranded it as a `[Photo]` placeholder, since the in-memory info was
+    gone but the message itself looked like it was just "not downloaded
+    yet". Fixed by persisting the download reference on the `chatMessage`
+    itself (cleared once the image actually downloads), so a later process
+    can retry it.
+  - **Known gap, not yet fixed**: WhatsApp's one-time history-sync only
+    includes full message backlog for a subset of chats (recently-active
+    ones, in this account's case 3 of 274) — others show no messages until
+    a live message arrives in them. Same underlying cause as the chat-list
+    caveat below (history-sync is one-time, not on-demand).
+  - **Chat list caveat**: WhatsApp's multi-device protocol only pushes the
+    full conversation history-sync once, right after a device is linked
+    (`events.HistorySync` in whatsmeow). `core/` accumulates conversations
+    from that sync into `chats.json` (in the same working dir as
+    `whatsapp.db`) and re-emits it on every subsequent launch so a
+    reconnect still has something to show immediately — but a session that
+    was linked *before* this feature existed (or any session already past
+    its initial sync) will never receive another history-sync, so the chat
+    list stays empty until the device is unlinked and re-linked via a fresh
+    QR scan. Confirmed on the LightOS emulator (2026-07-29): reconnect path
+    correctly shows the "Downloading chats..." empty state, no crash.
+    Full data path verified end-to-end the same day with a real fresh QR
+    scan: 274 chats (161 direct, 113 groups) downloaded and rendered. That
+    fresh sync exposed two real bugs, both fixed: (1)
+    `Conversation.GetConversationTimestamp()`/`GetLastMsgTimestamp()` came
+    back 0 for every entry in the `RECENT` sync chunk — fixed by falling
+    back to the max per-message timestamp in that conversation's bundled
+    `Messages`. (2) `Conversation.Name` is only ever populated for 1:1
+    chats, never groups — history sync alone can't produce a group's
+    subject. Fixed with one `GetJoinedGroups` bulk IQ call (a single
+    request, not one per group) on every `Connected` event, backfilling
+    names into already-accumulated chats and re-emitting; resolved
+    108/113 group names in testing (the rest are likely groups the
+    account has since left, which `GetJoinedGroups` correctly excludes).
+  - **Ordering fix (2026-07-29, same day)**: the timestamp fix above turned
+    out to be necessary but not sufficient — `handleHistorySync` was
+    unconditionally overwriting each JID's `chatSummary` on every chunk it
+    saw, so a later chunk with an unset timestamp/name silently threw away
+    good data an earlier chunk had already supplied for that same JID. Sync
+    chunks for the same JID are now merged (max timestamp, prefer a
+    non-empty name/explicit unread count) instead of clobbered. Also added
+    a `*events.Message` handler so any new message — sent or received, from
+    any linked device — bumps its chat to the top going forward, matching
+    WhatsApp's own behavior once the one-time history sync is no longer
+    available to lean on. Reverified with a second fresh QR link: all 274
+    chats got real (nonzero) timestamps and the list came out correctly
+    sorted newest-first.
+  - **Known minor gap, not yet fixed**: a handful of 1:1 chat names still
+    show as raw phone numbers instead of the contact's name. Likely cause:
+    whatsmeow's `PUSH_NAME` chunk processing is async
+    (`go doStorage(...)` in `message.go`'s `DownloadHistorySync`) and isn't
+    guaranteed to finish writing to `Store.Contacts` before the `RECENT`
+    chunk arrives and does its contact lookup — a race, not something a
+    resync fixes deterministically. Low priority, not blocking.
 - **`tool/`**: still Light's unmodified sample scaffold
   (`HomeScreen`/`DetailScreen`/`ToolEntryPoint`), kept only for tracking
   upstream `light-sdk` changes. Not used by this project's actual app.
-- IPC for this phase is one-directional and simple: `core/main.go` emits
-  newline-delimited JSON on stdout (`{"type":"qr",...}` /
-  `{"type":"connected",...}` / etc.), human-readable logs go to stderr. A
-  richer bidirectional contract (Photon-style local socket, needed once
-  `core/` has to push incoming messages) is deferred to the chat-UI phase.
+- IPC is newline-delimited JSON, both directions, over the subprocess's
+  stdin/stdout: `core/main.go` emits events on stdout (`{"type":"qr",...}` /
+  `{"type":"connected",...}` / `{"type":"chats",...}` /
+  `{"type":"messages",...}`), `app/` sends commands on stdin
+  (`{"type":"open_chat","jid":...}`), human-readable logs go to stderr on
+  both sides of that split. Still a plain pipe, not a socket — fine for
+  one Activity-scoped subprocess with a single client; would need
+  revisiting (Photon-style local socket) if `core/` ever has more than one
+  consumer at a time.
 
 ## Repo layout / remotes
 
@@ -202,7 +286,19 @@ new, ours, not part of upstream.
 6. Persistent connection: replace the Activity-scoped subprocess lifetime
    with a real foreground service (notification channel, Doze/battery
    handling) once real-time message delivery is needed.
-7. Chat UI: repurpose/extend `app/`'s screens into a chat-list/thread UI,
-   fed by `core/` message events (requires extending the stdout protocol or
-   moving to a bidirectional socket — reference Photon).
-8. Media handling, then groups, then polish — in that order.
+7. ~~Chat UI: repurpose/extend `app/`'s screens into a chat-list/thread
+   UI~~ — done and verified end-to-end (2026-07-29). Chat list: `core/`
+   emits a `"chats"` event built from history-sync conversations, `app/`
+   renders it once connected. Thread view: tapping a chat sends
+   `open_chat`, `core/` replies with a `"messages"` event (text + images,
+   see Architecture above); real message backlog and a live incoming photo
+   both confirmed rendering correctly.
+8. ~~Sending messages: requires extending the stdout protocol to be
+   bidirectional~~ — the bidirectional half is done (`open_chat` over
+   stdin, see Architecture above); *sending* messages themselves (a new
+   `send_message` command, `core/` calling whatsmeow's send APIs) is still
+   open.
+9. Groups are already handled in chat viewing (sender names, `is_group`);
+   remaining polish: the known per-chat-backlog gap above, and images
+   currently being the only non-text media type (video/audio/documents
+   still dropped during extraction).
