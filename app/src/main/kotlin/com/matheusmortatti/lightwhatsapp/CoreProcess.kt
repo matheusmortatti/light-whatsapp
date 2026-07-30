@@ -20,8 +20,9 @@ data class Chat(
     val isGroup: Boolean,
 )
 
-// Only "text" and "image" ever show up here (see core/main.go's extractMessage) —
-// every other WhatsApp message type is dropped before it reaches the app.
+// Only "text", "image", and "audio" ever show up here (see core/main.go's
+// extractMessage) — every other WhatsApp message type is dropped before it
+// reaches the app.
 data class Message(
     val id: String,
     val timestamp: Long,
@@ -32,6 +33,11 @@ data class Message(
     // Path relative to the process's working dir (context.filesDir) — null until
     // core finishes downloading it, for image messages.
     val imagePath: String?,
+    // Same deal as imagePath, but for audio messages; audioSeconds is known
+    // up front (from the sender's protobuf) even while the file itself is
+    // still downloading.
+    val audioPath: String?,
+    val audioSeconds: Int,
 )
 
 sealed class CoreEvent {
@@ -117,6 +123,23 @@ class CoreProcess(private val context: Context) {
         writeCommand(JSONObject().put("type", "send_message").put("jid", jid).put("text", text))
     }
 
+    /**
+     * Sends a "send_audio" command to core's stdin, asking it to upload and
+     * send a recorded voice message to the given chat — see core/main.go's
+     * readCommands/handleSendAudio. [audioPath] must be relative to
+     * context.filesDir (core's working dir), same as a downloaded message's
+     * imagePath/audioPath. A no-op if the subprocess isn't running.
+     */
+    fun sendAudio(jid: String, audioPath: String, durationMs: Long) {
+        writeCommand(
+            JSONObject()
+                .put("type", "send_audio")
+                .put("jid", jid)
+                .put("audio_path", audioPath)
+                .put("duration_ms", durationMs),
+        )
+    }
+
     private fun writeCommand(command: JSONObject) {
         val out = process?.outputStream ?: return
         val line = command.toString() + "\n"
@@ -172,6 +195,8 @@ class CoreProcess(private val context: Context) {
                 type = o.optString("type", "text"),
                 text = o.optString("text"),
                 imagePath = o.optString("image_path").ifBlank { null },
+                audioPath = o.optString("audio_path").ifBlank { null },
+                audioSeconds = o.optInt("audio_seconds", 0),
             )
         }
     }

@@ -71,18 +71,21 @@ type event struct {
 }
 
 // command is one line of the stdin protocol: the app asking core for
-// something — "open_chat" to fetch (and start filling in images for) one
-// conversation's messages and mark it read, "close_chat" to tell core the
-// app navigated away (see openChatJID), or "send_message" to send a text
-// message to a jid.
+// something — "open_chat" to fetch (and start filling in images/audio for)
+// one conversation's messages and mark it read, "close_chat" to tell core
+// the app navigated away (see openChatJID), "send_message" to send a text
+// message to a jid, or "send_audio" to upload and send a recorded voice
+// message (AudioPath, relative to the working dir, plus its DurationMs).
 type command struct {
-	Type string `json:"type"`
-	JID  string `json:"jid,omitempty"`
-	Text string `json:"text,omitempty"`
+	Type       string `json:"type"`
+	JID        string `json:"jid,omitempty"`
+	Text       string `json:"text,omitempty"`
+	AudioPath  string `json:"audio_path,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
 }
 
-// chatMessage is one message within a chat, as sent to the app. Only text
-// and image messages are represented — everything else (video, audio,
+// chatMessage is one message within a chat, as sent to the app. Only text,
+// image, and audio messages are represented — everything else (video,
 // documents, stickers, polls, reactions, ...) is dropped during extraction,
 // per the app's scope.
 type chatMessage struct {
@@ -91,7 +94,7 @@ type chatMessage struct {
 	FromMe     bool   `json:"from_me"`
 	Sender     string `json:"sender,omitempty"`      // sender JID, group chats only
 	SenderName string `json:"sender_name,omitempty"` // best-effort display name, group chats only
-	Type       string `json:"type"`                  // "text" | "image"
+	Type       string `json:"type"`                  // "text" | "image" | "audio"
 	Text       string `json:"text,omitempty"`        // body, or an image's caption
 	ImagePath  string `json:"image_path,omitempty"`  // path (relative to the working dir) once downloaded
 
@@ -105,6 +108,16 @@ type chatMessage struct {
 	ImageFileSHA256    []byte `json:"image_file_sha256,omitempty"`
 	ImageFileEncSHA256 []byte `json:"image_file_enc_sha256,omitempty"`
 	ImageMimetype      string `json:"image_mimetype,omitempty"`
+
+	AudioPath    string `json:"audio_path,omitempty"`    // path (relative to the working dir) once downloaded
+	AudioSeconds uint32 `json:"audio_seconds,omitempty"` // duration, known up front unlike images
+
+	// Same deal as the Image* fields above, but for audio (see downloadAudio).
+	AudioDirectPath    string `json:"audio_direct_path,omitempty"`
+	AudioMediaKey      []byte `json:"audio_media_key,omitempty"`
+	AudioFileSHA256    []byte `json:"audio_file_sha256,omitempty"`
+	AudioFileEncSHA256 []byte `json:"audio_file_enc_sha256,omitempty"`
+	AudioMimetype      string `json:"audio_mimetype,omitempty"`
 }
 
 // chatSummary is one entry of a "chats" event: a single conversation as
@@ -275,16 +288,18 @@ func upsertMessage(messages map[string][]chatMessage, jid string, msg chatMessag
 // messages arrive in. Anything else (video, audio, documents, stickers,
 // polls, reactions, location, ...) comes back ok=false — the app only shows
 // text and images.
-func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, ok bool) {
+func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, audio *waE2E.AudioMessage, ok bool) {
 	for i := 0; i < 4 && m != nil; i++ {
 		switch {
 		case m.GetConversation() != "":
-			return m.GetConversation(), "text", nil, true
+			return m.GetConversation(), "text", nil, nil, true
 		case m.GetExtendedTextMessage() != nil:
-			return m.GetExtendedTextMessage().GetText(), "text", nil, true
+			return m.GetExtendedTextMessage().GetText(), "text", nil, nil, true
 		case m.GetImageMessage() != nil:
 			im := m.GetImageMessage()
-			return im.GetCaption(), "image", im, true
+			return im.GetCaption(), "image", im, nil, true
+		case m.GetAudioMessage() != nil:
+			return "", "audio", nil, m.GetAudioMessage(), true
 		case m.GetEphemeralMessage() != nil:
 			m = m.GetEphemeralMessage().GetMessage()
 		case m.GetViewOnceMessage() != nil:
@@ -292,10 +307,10 @@ func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMes
 		case m.GetViewOnceMessageV2() != nil:
 			m = m.GetViewOnceMessageV2().GetMessage()
 		default:
-			return "", "", nil, false
+			return "", "", nil, nil, false
 		}
 	}
-	return "", "", nil, false
+	return "", "", nil, nil, false
 }
 
 // mentionPattern matches WhatsApp's raw @-mention syntax embedded directly in
@@ -367,6 +382,18 @@ func setImageFields(cm *chatMessage, img *waE2E.ImageMessage) {
 	cm.ImageMimetype = img.GetMimetype()
 }
 
+// setAudioFields is setImageFields' counterpart for audio messages — fills
+// in cm's persisted download reference from audio, plus its duration (known
+// up front, unlike an image's dimensions/size).
+func setAudioFields(cm *chatMessage, audio *waE2E.AudioMessage) {
+	cm.AudioDirectPath = audio.GetDirectPath()
+	cm.AudioMediaKey = audio.GetMediaKey()
+	cm.AudioFileSHA256 = audio.GetFileSHA256()
+	cm.AudioFileEncSHA256 = audio.GetFileEncSHA256()
+	cm.AudioMimetype = audio.GetMimetype()
+	cm.AudioSeconds = audio.GetSeconds()
+}
+
 // extractHistoryMessage pulls one history-sync message into messages, if it's
 // a type the app renders (see extractMessage). Image media is noted but not
 // downloaded here — history sync can carry years of backlog, so downloading
@@ -380,7 +407,7 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	if waMsg == nil || key.GetID() == "" {
 		return
 	}
-	text, msgType, img, ok := extractMessage(waMsg)
+	text, msgType, img, audio, ok := extractMessage(waMsg)
 	if !ok {
 		return
 	}
@@ -394,6 +421,9 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	}
 	if msgType == "image" && img != nil {
 		setImageFields(&cm, img)
+	}
+	if msgType == "audio" && audio != nil {
+		setAudioFields(&cm, audio)
 	}
 	if jid.Server == types.GroupServer && !key.GetFromMe() {
 		participant := key.GetParticipant()
@@ -472,6 +502,73 @@ func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 				list[i].ImageFileSHA256 = nil
 				list[i].ImageFileEncSHA256 = nil
 				list[i].ImageMimetype = ""
+				break
+			}
+		}
+		messages[jid] = list
+		saveMessages(jid, list)
+	}
+	messagesMu.Unlock()
+
+	if ok {
+		emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
+	}
+}
+
+// audioExtension maps a media mimetype to a file extension. WhatsApp voice
+// notes are normally Opus-in-Ogg, but this app's own recordings (see
+// handleSendAudio) are AAC-in-MPEG-4, so both need to round-trip cleanly.
+func audioExtension(mimetype string) string {
+	switch {
+	case strings.Contains(mimetype, "ogg"):
+		return "ogg"
+	case strings.Contains(mimetype, "amr"):
+		return "amr"
+	case strings.Contains(mimetype, "mpeg"), strings.Contains(mimetype, "mp3"):
+		return "mp3"
+	case strings.Contains(mimetype, "wav"):
+		return "wav"
+	default:
+		return "m4a"
+	}
+}
+
+func audioPath(jid, msgID, mimetype string) string {
+	return filepath.Join("media", jid, msgID+"."+audioExtension(mimetype))
+}
+
+// downloadAudio is downloadImage's counterpart for audio messages: fetches
+// the media (using the persisted download reference set by setAudioFields),
+// writes it to disk, and updates the stored chatMessage with the resulting
+// path, re-emitting the chat's message list so the app can render a player
+// once it lands. Meant to run in its own goroutine.
+func downloadAudio(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage, jid string, m chatMessage) {
+	data, err := client.DownloadMediaWithPath(ctx, m.AudioDirectPath, m.AudioFileEncSHA256, m.AudioFileSHA256, m.AudioMediaKey, whatsmeow.MediaAudio, "", false)
+	if err != nil {
+		logger.Warnf("failed to download audio %s/%s: %v", jid, m.ID, err)
+		return
+	}
+	path := audioPath(jid, m.ID, m.AudioMimetype)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		logger.Warnf("failed to create media dir for %s: %v", jid, err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		logger.Warnf("failed to write audio %s/%s: %v", jid, m.ID, err)
+		return
+	}
+
+	messagesMu.Lock()
+	list, ok := messages[jid]
+	if ok {
+		for i, cur := range list {
+			if cur.ID == m.ID {
+				list[i].AudioPath = path
+				list[i].AudioDirectPath = ""
+				list[i].AudioMediaKey = nil
+				list[i].AudioFileSHA256 = nil
+				list[i].AudioFileEncSHA256 = nil
+				list[i].AudioMimetype = ""
 				break
 			}
 		}
@@ -574,20 +671,27 @@ func handleOpenChat(ctx context.Context, client *whatsmeow.Client, logger waLog.
 		messages[jid] = list
 	}
 	var toDownload []chatMessage
+	var toDownloadAudio []chatMessage
 	for _, m := range list {
 		if m.Type == "image" && m.ImagePath == "" && m.ImageDirectPath != "" {
 			toDownload = append(toDownload, m)
 		}
+		if m.Type == "audio" && m.AudioPath == "" && m.AudioDirectPath != "" {
+			toDownloadAudio = append(toDownloadAudio, m)
+		}
 	}
 	messagesMu.Unlock()
 
-	logger.Debugf("open_chat %s: %d cached messages, %d images to download", jid, len(list), len(toDownload))
+	logger.Debugf("open_chat %s: %d cached messages, %d images to download, %d audio to download", jid, len(list), len(toDownload), len(toDownloadAudio))
 	emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
 
 	go markChatReadAndClearUnread(ctx, client, logger, jid, list, chats)
 
 	for _, m := range toDownload {
 		go downloadImage(ctx, client, logger, messages, jid, m)
+	}
+	for _, m := range toDownloadAudio {
+		go downloadAudio(ctx, client, logger, messages, jid, m)
 	}
 }
 
@@ -637,6 +741,98 @@ func handleSendMessage(ctx context.Context, client *whatsmeow.Client, logger waL
 	emit(event{Type: "messages", JID: jidStr, Messages: resolveMentionsInList(ctx, client, msgList)})
 }
 
+// recordedAudioMimetype is what this app's own recordings are encoded as
+// (AAC audio in an MPEG-4 container — see app/'s VoiceRecorder). Sent as a
+// regular (non-PTT) audio attachment rather than faking an Opus/Ogg voice
+// note: WhatsApp clients trust the mimetype, and claiming "audio/ogg;
+// codecs=opus" over AAC bytes would fail to decode on the receiving end.
+const recordedAudioMimetype = "audio/mp4"
+
+// handleSendAudio uploads a recorded voice message (an AAC/MPEG-4 file at
+// path, relative to the process's working directory — see CoreProcess.kt's
+// sendAudio) to WhatsApp servers, sends it as an audio message to jid, then
+// folds it into the local cache the same way handleSendMessage does for
+// text. The recording is moved into the same media/<jid>/<msgID>.<ext>
+// layout downloadAudio uses for incoming audio, so it survives independent
+// of wherever the app staged it.
+func handleSendAudio(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, jidStr, path string, durationMs int64, chats map[string]chatSummary, messages map[string][]chatMessage) {
+	jid, err := types.ParseJID(jidStr)
+	if err != nil {
+		logger.Warnf("send_audio: bad jid %q: %v", jidStr, err)
+		return
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		logger.Warnf("send_audio: failed to read %s: %v", path, err)
+		emit(event{Type: "error", Message: fmt.Sprintf("failed to read recording: %v", err)})
+		return
+	}
+
+	uploaded, err := client.Upload(ctx, data, whatsmeow.MediaAudio)
+	if err != nil {
+		logger.Warnf("send_audio: upload to %s failed: %v", jidStr, err)
+		emit(event{Type: "error", Message: fmt.Sprintf("failed to upload recording: %v", err)})
+		return
+	}
+
+	seconds := uint32(durationMs / 1000)
+	resp, err := client.SendMessage(ctx, jid, &waE2E.Message{
+		AudioMessage: &waE2E.AudioMessage{
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			Mimetype:      proto.String(recordedAudioMimetype),
+			FileLength:    proto.Uint64(uploaded.FileLength),
+			FileSHA256:    uploaded.FileSHA256,
+			FileEncSHA256: uploaded.FileEncSHA256,
+			MediaKey:      uploaded.MediaKey,
+			Seconds:       proto.Uint32(seconds),
+			PTT:           proto.Bool(false),
+		},
+	})
+	if err != nil {
+		logger.Warnf("send_audio to %s failed: %v", jidStr, err)
+		emit(event{Type: "error", Message: fmt.Sprintf("failed to send recording: %v", err)})
+		return
+	}
+	timestamp := resp.Timestamp.Unix()
+
+	chatsMu.Lock()
+	c, ok := chats[jidStr]
+	if !ok {
+		c = chatSummary{JID: jidStr, Name: jid.User, IsGroup: jid.Server == types.GroupServer}
+	}
+	c.Timestamp = timestamp
+	chats[jidStr] = c
+	list := saveChats(chats)
+	chatsMu.Unlock()
+	emit(event{Type: "chats", Chats: list})
+
+	finalPath := audioPath(jidStr, resp.ID, recordedAudioMimetype)
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0o700); err != nil {
+		logger.Warnf("send_audio: failed to create media dir for %s: %v", jidStr, err)
+	} else if err := os.Rename(path, finalPath); err != nil {
+		logger.Warnf("send_audio: failed to move recording into media cache: %v", err)
+	} else {
+		path = finalPath
+	}
+
+	cm := chatMessage{
+		ID:           resp.ID,
+		Timestamp:    timestamp,
+		FromMe:       true,
+		Type:         "audio",
+		AudioPath:    path,
+		AudioSeconds: seconds,
+	}
+
+	messagesMu.Lock()
+	msgList := upsertMessage(messages, jidStr, cm)
+	messagesMu.Unlock()
+
+	emit(event{Type: "messages", JID: jidStr, Messages: resolveMentionsInList(ctx, client, msgList)})
+}
+
 // readCommands is the stdin half of the protocol: one JSON command per
 // line from the app. Runs for the life of the process; a closed stdin
 // (app process torn down) just ends the loop.
@@ -660,6 +856,10 @@ func readCommands(ctx context.Context, client *whatsmeow.Client, logger waLog.Lo
 		case "send_message":
 			if cmd.JID != "" && cmd.Text != "" {
 				go handleSendMessage(ctx, client, logger, cmd.JID, cmd.Text, chats, messages)
+			}
+		case "send_audio":
+			if cmd.JID != "" && cmd.AudioPath != "" {
+				go handleSendAudio(ctx, client, logger, cmd.JID, cmd.AudioPath, cmd.DurationMs, chats, messages)
 			}
 		default:
 			logger.Warnf("unknown command from app: %s", cmd.Type)
@@ -841,7 +1041,7 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 		emit(event{Type: "chats", Chats: list})
 	}
 
-	text, msgType, img, ok := extractMessage(evt.Message)
+	text, msgType, img, audio, ok := extractMessage(evt.Message)
 	if !ok {
 		return
 	}
@@ -854,6 +1054,9 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 	if msgType == "image" && img != nil {
 		setImageFields(&cm, img)
+	}
+	if msgType == "audio" && audio != nil {
+		setAudioFields(&cm, audio)
 	}
 	if evt.Info.IsGroup && !evt.Info.IsFromMe {
 		cm.Sender = evt.Info.Sender.String()
@@ -872,6 +1075,9 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 
 	if msgType == "image" && img != nil {
 		go downloadImage(ctx, client, logger, messages, jid.String(), cm)
+	}
+	if msgType == "audio" && audio != nil {
+		go downloadAudio(ctx, client, logger, messages, jid.String(), cm)
 	}
 }
 

@@ -93,6 +93,16 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
         coreProcess.sendMessage(jid, text)
     }
 
+    /**
+     * Sends a recorded voice message to the currently open chat. [audioPath]
+     * must be relative to the app's files dir (see CoreProcess.sendAudio).
+     * A no-op if no chat is open.
+     */
+    fun sendAudio(audioPath: String, durationMs: Long) {
+        val jid = _selectedChat.value?.jid ?: return
+        coreProcess.sendAudio(jid, audioPath, durationMs)
+    }
+
     private fun encodeQr(text: String, size: Int = 512): ImageBitmap {
         val matrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)
