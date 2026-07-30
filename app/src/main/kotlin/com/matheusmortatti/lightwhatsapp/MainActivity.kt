@@ -37,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.State
 import androidx.compose.runtime.produceState
+import androidx.compose.material3.Text
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
@@ -63,6 +64,7 @@ import com.thelightphone.sdk.ui.LightThemeTokens
 import com.thelightphone.sdk.ui.LightTopBar
 import com.thelightphone.sdk.ui.LightTopBarCenter
 import com.thelightphone.sdk.ui.defaultKeyboardOptions
+import com.thelightphone.sdk.ui.designVerticalPxToSp
 import com.thelightphone.sdk.ui.gridUnitsAsDp
 import com.thelightphone.sdk.ui.lightClickable
 import java.io.File
@@ -135,7 +137,7 @@ private fun LoginScreen(state: LoginState) {
 
         when (state) {
             is LoginState.Idle -> LightText(
-                text = "Waiting for QR code...",
+                text = "Loading...",
                 variant = LightTextVariant.Copy,
                 lighten = true,
             )
@@ -424,11 +426,39 @@ private fun ChatDetailScreen(
                     .fillMaxWidth(),
                 scrollState = scrollState,
             ) {
-                messages.forEach { message ->
+                messages.forEachIndexed { index, message ->
+                    val previous = messages.getOrNull(index - 1)
+                    val sameSender = previous != null &&
+                        previous.fromMe == message.fromMe &&
+                        (!chat.isGroup || previous.senderName == message.senderName)
+                    val withinClusterWindow = previous != null &&
+                        (message.timestamp - previous.timestamp) <= MESSAGE_CLUSTER_WINDOW_SECONDS
+                    val dateChanged = previous == null || !isSameLocalDate(previous.timestamp, message.timestamp)
+                    val showHeader = dateChanged || !(sameSender && withinClusterWindow)
+                    if (dateChanged) {
+                        DateSeparator(
+                            timestampSeconds = message.timestamp,
+                            modifier = Modifier.padding(
+                                start = 24.dp,
+                                end = 24.dp,
+                                top = if (index == 0) 0.dp else 16.dp,
+                            ),
+                        )
+                    }
                     MessageRow(
                         message = message,
                         isGroup = chat.isGroup,
-                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                        chatName = chat.name,
+                        showHeader = showHeader,
+                        modifier = Modifier.padding(
+                            start = 24.dp,
+                            end = 24.dp,
+                            // Must clear Copy's own wrapped-line leading
+                            // (fontSize * 1.5 lineHeight, ~10-12dp on this
+                            // screen) or separate clustered messages read as
+                            // one wrapped message.
+                            top = if (showHeader) 14.dp else 9.dp,
+                        ),
                     )
                 }
             }
@@ -465,6 +495,50 @@ private fun ChatDetailScreen(
 }
 
 private const val RECORDING_TIMER_TICK_MS = 200L
+
+// Consecutive messages from the same sender within this window are
+// clustered under one header; a longer gap starts a fresh one even if the
+// sender hasn't changed.
+private const val MESSAGE_CLUSTER_WINDOW_SECONDS = 5 * 60L
+
+private val messageTimeFormatter = java.time.format.DateTimeFormatter.ofPattern("HH:mm")
+
+// message.timestamp is Unix seconds (see core/main.go's handleMessage).
+private fun formatMessageTime(timestampSeconds: Long): String =
+    java.time.Instant.ofEpochSecond(timestampSeconds)
+        .atZone(java.time.ZoneId.systemDefault())
+        .format(messageTimeFormatter)
+
+private fun localDateOf(timestampSeconds: Long): java.time.LocalDate =
+    java.time.Instant.ofEpochSecond(timestampSeconds)
+        .atZone(java.time.ZoneId.systemDefault())
+        .toLocalDate()
+
+private fun isSameLocalDate(aSeconds: Long, bSeconds: Long): Boolean =
+    localDateOf(aSeconds) == localDateOf(bSeconds)
+
+private val messageDateFormatter = java.time.format.DateTimeFormatter.ofPattern("EEEE, MMM d")
+
+private fun formatMessageDate(timestampSeconds: Long): String {
+    val date = localDateOf(timestampSeconds)
+    val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault())
+    return when (date) {
+        today -> "Today"
+        today.minusDays(1) -> "Yesterday"
+        else -> date.format(messageDateFormatter)
+    }
+}
+
+@Composable
+private fun DateSeparator(timestampSeconds: Long, modifier: Modifier = Modifier) {
+    Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        LightText(
+            text = formatMessageDate(timestampSeconds),
+            variant = LightTextVariant.Fine,
+            lighten = true,
+        )
+    }
+}
 
 @Composable
 private fun RecordingScreen(
@@ -508,17 +582,39 @@ private fun RecordingScreen(
 }
 
 @Composable
-private fun MessageRow(message: Message, isGroup: Boolean, modifier: Modifier = Modifier) {
+private fun MessageRow(
+    message: Message,
+    isGroup: Boolean,
+    chatName: String,
+    showHeader: Boolean,
+    modifier: Modifier = Modifier,
+) {
     Column(
         modifier = modifier.fillMaxWidth(),
         horizontalAlignment = if (message.fromMe) Alignment.End else Alignment.Start,
     ) {
-        if (isGroup && !message.fromMe && !message.senderName.isNullOrBlank()) {
-            LightText(
-                text = message.senderName,
-                variant = LightTextVariant.Fine,
-                lighten = true,
-            )
+        // Header (sender + time) is skipped for messages clustered with the
+        // one before them — long messages wrap across the full line width,
+        // which erases the left/right alignment cue, so the header is what
+        // actually tells you who sent it and when.
+        if (showHeader) {
+            val senderLabel = when {
+                message.fromMe -> "You"
+                isGroup -> message.senderName?.takeIf { it.isNotBlank() } ?: chatName
+                else -> chatName
+            }
+            Row {
+                LightText(
+                    text = senderLabel,
+                    variant = LightTextVariant.Fine,
+                    lighten = true,
+                )
+                LightText(
+                    text = "  " + formatMessageTime(message.timestamp),
+                    variant = LightTextVariant.Fine,
+                    lighten = true,
+                )
+            }
         }
 
         when (message.type) {
@@ -541,7 +637,7 @@ private fun MessageRow(message: Message, isGroup: Boolean, modifier: Modifier = 
                     LightText(text = "[Photo]", variant = LightTextVariant.Copy, lighten = true)
                 }
                 if (message.text.isNotBlank()) {
-                    LightText(text = message.text, variant = LightTextVariant.Copy)
+                    MessageBodyText(text = message.text)
                 }
             }
 
@@ -554,9 +650,33 @@ private fun MessageRow(message: Message, isGroup: Boolean, modifier: Modifier = 
                 }
             }
 
-            else -> LightText(text = message.text, variant = LightTextVariant.Copy)
+            else -> MessageBodyText(text = message.text)
         }
     }
+}
+
+// Copy's own line-height (fontSize * 1.5, see LightTheme.kt) is tuned for
+// short standalone lines, not paragraphs — at that ratio, the gap between
+// two wrapped lines of ONE message reads about as big as the gap we put
+// between two separate clustered messages, so lines of a single message
+// look like distinct messages. Message bodies get their own tighter
+// line-height instead, kept local to this screen rather than changed on
+// the shared Copy token (which other Light SDK consumers rely on).
+private const val MESSAGE_LINE_HEIGHT_MULTIPLIER = 1.15f
+
+@Composable
+private fun MessageBodyText(text: String, modifier: Modifier = Modifier) {
+    val base = LightThemeTokens.typography.copy
+    val style = base.copy(
+        fontSize = base.fontSize.value.designVerticalPxToSp(),
+        lineHeight = (base.fontSize.value * MESSAGE_LINE_HEIGHT_MULTIPLIER).designVerticalPxToSp(),
+    )
+    Text(
+        text = text,
+        modifier = modifier,
+        color = LightThemeTokens.colors.content,
+        style = style,
+    )
 }
 
 // Plays a "audio" message's file off the main thread — core writes it
