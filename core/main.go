@@ -37,6 +37,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 
 	_ "modernc.org/sqlite"
 )
@@ -70,11 +71,12 @@ type event struct {
 }
 
 // command is one line of the stdin protocol: the app asking core for
-// something. Currently just "open_chat", to fetch (and start filling in
-// images for) one conversation's messages.
+// something — "open_chat" to fetch (and start filling in images for) one
+// conversation's messages, or "send_message" to send a text message to a jid.
 type command struct {
 	Type string `json:"type"`
 	JID  string `json:"jid,omitempty"`
+	Text string `json:"text,omitempty"`
 }
 
 // chatMessage is one message within a chat, as sent to the app. Only text
@@ -479,10 +481,56 @@ func handleOpenChat(ctx context.Context, client *whatsmeow.Client, logger waLog.
 	}
 }
 
+// handleSendMessage sends a text message to jid via WhatsApp, then folds the
+// sent message into the local cache the same way a live incoming message
+// would (see handleMessage) — bumping the chat to the front and emitting
+// both updated events — so it shows up immediately rather than waiting for
+// the server to echo it back as a *events.Message.
+func handleSendMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, jidStr, text string, chats map[string]chatSummary, messages map[string][]chatMessage) {
+	jid, err := types.ParseJID(jidStr)
+	if err != nil {
+		logger.Warnf("send_message: bad jid %q: %v", jidStr, err)
+		return
+	}
+
+	resp, err := client.SendMessage(ctx, jid, &waE2E.Message{Conversation: proto.String(text)})
+	if err != nil {
+		logger.Warnf("send_message to %s failed: %v", jidStr, err)
+		emit(event{Type: "error", Message: fmt.Sprintf("failed to send message: %v", err)})
+		return
+	}
+	timestamp := resp.Timestamp.Unix()
+
+	chatsMu.Lock()
+	c, ok := chats[jidStr]
+	if !ok {
+		c = chatSummary{JID: jidStr, Name: jid.User, IsGroup: jid.Server == types.GroupServer}
+	}
+	c.Timestamp = timestamp
+	chats[jidStr] = c
+	list := saveChats(chats)
+	chatsMu.Unlock()
+	emit(event{Type: "chats", Chats: list})
+
+	cm := chatMessage{
+		ID:        resp.ID,
+		Timestamp: timestamp,
+		FromMe:    true,
+		Type:      "text",
+		Text:      text,
+	}
+
+	messagesMu.Lock()
+	msgList := upsertMessage(messages, jidStr, cm)
+	messagesMu.Unlock()
+
+	emit(event{Type: "messages", JID: jidStr, Messages: resolveMentionsInList(ctx, client, msgList)})
+}
+
 // readCommands is the stdin half of the protocol: one JSON command per
 // line from the app. Runs for the life of the process; a closed stdin
 // (app process torn down) just ends the loop.
-func readCommands(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage) {
+func readCommands(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, chats map[string]chatSummary, messages map[string][]chatMessage) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		var cmd command
@@ -494,6 +542,10 @@ func readCommands(ctx context.Context, client *whatsmeow.Client, logger waLog.Lo
 		case "open_chat":
 			if cmd.JID != "" {
 				go handleOpenChat(ctx, client, logger, cmd.JID, messages)
+			}
+		case "send_message":
+			if cmd.JID != "" && cmd.Text != "" {
+				go handleSendMessage(ctx, client, logger, cmd.JID, cmd.Text, chats, messages)
 			}
 		default:
 			logger.Warnf("unknown command from app: %s", cmd.Type)
@@ -825,7 +877,7 @@ func main() {
 			refreshContactName(ctx, client, e.JID, chats)
 		}
 	})
-	go readCommands(ctx, client, logger, messages)
+	go readCommands(ctx, client, logger, chats, messages)
 
 	if client.Store.ID == nil {
 		// No existing session: request a QR code and wait for it to be scanned.

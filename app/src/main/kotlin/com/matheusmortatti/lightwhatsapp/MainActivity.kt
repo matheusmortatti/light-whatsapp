@@ -14,9 +14,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.State
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
@@ -31,15 +36,19 @@ import com.thelightphone.sdk.ui.LightBarButton
 import com.thelightphone.sdk.ui.LightIcons
 import com.thelightphone.sdk.ui.LightScrollView
 import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTextField
+import com.thelightphone.sdk.ui.LightTextInputEditor
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.LightTheme
 import com.thelightphone.sdk.ui.LightThemeController
 import com.thelightphone.sdk.ui.LightThemeTokens
 import com.thelightphone.sdk.ui.LightTopBar
 import com.thelightphone.sdk.ui.LightTopBarCenter
+import com.thelightphone.sdk.ui.defaultKeyboardOptions
 import com.thelightphone.sdk.ui.lightClickable
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 
 // Not a light-sdk Tool (no LightScreen/LightActivity/@InitialScreen) — this
@@ -70,6 +79,7 @@ private fun QrLoginScreen(viewModel: QrLoginViewModel = viewModel()) {
             chat = selectedChat!!,
             messages = messages,
             onBack = viewModel::closeChat,
+            onSend = viewModel::sendMessage,
         )
         else -> ChatListScreen(chats = chats, onChatClick = viewModel::openChat)
     }
@@ -181,8 +191,35 @@ private fun ChatRow(chat: Chat, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ChatDetailScreen(chat: Chat, messages: List<Message>, onBack: () -> Unit) {
-    BackHandler(onBack = onBack)
+private fun ChatDetailScreen(
+    chat: Chat,
+    messages: List<Message>,
+    onBack: () -> Unit,
+    onSend: (String) -> Unit,
+) {
+    // Keyed on chat.jid so navigating to a different chat doesn't inherit
+    // this one's open-editor state.
+    var composing by rememberSaveable(chat.jid) { mutableStateOf(false) }
+    BackHandler(onBack = { if (composing) composing = false else onBack() })
+
+    if (composing) {
+        val textState = rememberTextFieldState("")
+        val keyboardOptionsFlow = remember { MutableStateFlow(defaultKeyboardOptions()) }
+        LightTextInputEditor(
+            title = chat.name,
+            state = textState,
+            keyboardOptionsFlow = keyboardOptionsFlow,
+            submitLabel = "SEND",
+            onSubmit = { text ->
+                val trimmed = text.toString().trim()
+                if (trimmed.isNotEmpty()) onSend(trimmed)
+                composing = false
+            },
+            onBack = { composing = false },
+            modifier = Modifier.background(LightThemeTokens.colors.background),
+        )
+        return
+    }
 
     Column(
         modifier = Modifier
@@ -223,6 +260,16 @@ private fun ChatDetailScreen(chat: Chat, messages: List<Message>, onBack: () -> 
                 }
             }
         }
+
+        LightTextField(
+            label = "Message",
+            value = "",
+            placeholder = "Tap to type a message",
+            onClick = { composing = true },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 12.dp),
+        )
     }
 }
 

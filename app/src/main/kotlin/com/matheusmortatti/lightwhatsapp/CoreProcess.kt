@@ -95,15 +95,29 @@ class CoreProcess(private val context: Context) {
      * already torn down).
      */
     fun openChat(jid: String) {
+        writeCommand(JSONObject().put("type", "open_chat").put("jid", jid))
+    }
+
+    /**
+     * Sends a "send_message" command to core's stdin, asking it to send a
+     * text message to the given chat — see core/main.go's
+     * readCommands/handleSendMessage. A no-op if the subprocess isn't
+     * running (events() not collected yet, or already torn down).
+     */
+    fun sendMessage(jid: String, text: String) {
+        writeCommand(JSONObject().put("type", "send_message").put("jid", jid).put("text", text))
+    }
+
+    private fun writeCommand(command: JSONObject) {
         val out = process?.outputStream ?: return
-        val line = JSONObject().put("type", "open_chat").put("jid", jid).toString() + "\n"
+        val line = command.toString() + "\n"
         try {
             synchronized(writeLock) {
                 out.write(line.toByteArray())
                 out.flush()
             }
         } catch (e: IOException) {
-            Log.w(TAG, "failed to send open_chat command", e)
+            Log.w(TAG, "failed to write command to core: $command", e)
         }
     }
 

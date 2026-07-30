@@ -86,6 +86,12 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
         _messages.value = emptyList()
     }
 
+    /** Sends a text message to the currently open chat. A no-op if no chat is open. */
+    fun sendMessage(text: String) {
+        val jid = _selectedChat.value?.jid ?: return
+        coreProcess.sendMessage(jid, text)
+    }
+
     private fun encodeQr(text: String, size: Int = 512): ImageBitmap {
         val matrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)
