@@ -1,9 +1,10 @@
 # core
 
 Go subprocess that speaks WhatsApp's multi-device protocol on behalf of the
-Light Phone tool (`../tool`). Built on [whatsmeow](https://github.com/tulir/whatsmeow)
-(MPL-2.0) — the same library `mautrix-whatsapp` / Beeper's own WhatsApp bridge
-use server-side.
+Light Phone app (`../app` — a standalone Android app, deliberately *not* the
+`light-sdk` `tool/` module; see `PROJECT.md`'s decision log for why). Built on
+[whatsmeow](https://github.com/tulir/whatsmeow) (MPL-2.0) — the same library
+`mautrix-whatsapp` / Beeper's own WhatsApp bridge use server-side.
 
 ## Why a subprocess instead of native Kotlin code
 
@@ -18,28 +19,70 @@ no need to re-derive it from scratch.
 
 ## State
 
-Stub only. `main.go` just proves the dependency graph (whatsmeow +
-`modernc.org/sqlite`, pure-Go, no CGO) compiles and cross-compiles cleanly.
-No WhatsApp logic yet.
+QR-login works, both standalone (`go run .`) and as an on-device subprocess
+launched by `../app` — confirmed end-to-end on the LightOS emulator
+(2026-07-29): launched via LightOS's own tool switcher, subprocess spawned,
+connected to WhatsApp's servers, real QR rendered on-screen. No chat/message
+logic yet.
+
+## Android DNS
+
+Android has no usable `/etc/resolv.conf`, so Go's pure-Go DNS resolver (the
+only option without cgo/NDK) fails every lookup with something like
+`dial tcp: lookup web.whatsapp.com on [::1]:53: connection refused`. Fixed in
+`main.go`'s `init()` by pointing `net.DefaultResolver` at a public DNS server
+(`8.8.8.8:53`) directly, bypassing system resolv.conf discovery entirely.
+Found via on-device testing, not something desktop `go run .` would ever
+surface — real LP3 hardware needs this too, not just the emulator.
+
+## stdout protocol
+
+`main.go` writes one JSON object per line to stdout — this is the entire IPC
+contract for the QR-login phase (see `../app/src/main/kotlin/.../CoreProcess.kt`
+for the consumer):
+
+```json
+{"type":"qr","code":"..."}
+{"type":"connected","jid":"..."}
+{"type":"logged_out"}
+{"type":"error","message":"..."}
+```
+
+All human-readable logging goes to stderr instead (see `stderrLogger` in
+`main.go`) so it never interleaves with the stdout event stream. The Android
+side sets the subprocess's working directory to its app-private files dir
+(`ProcessBuilder.directory(...)`), so `main.go`'s relative `whatsapp.db` path
+needs no changes to land in the right place.
+
+This one-directional protocol is intentionally minimal — enough for a login
+flow, not enough for chat. Extending it (or replacing it with a bidirectional
+local socket, Photon's choice) is chat-UI-phase work.
+
+## Building for Android
+
+`./build_android.sh` cross-compiles and drops the binary at
+`../app/src/main/jniLibs/arm64-v8a/libwhatsmeowcore.so`. The `lib*.so` name
+and `jniLibs` location are load-bearing: Android extracts and chmods files
+under `jniLibs` as executable native libs, which is how a plain-Go binary
+(no JNI involved) gets to run as a real subprocess despite Android's
+app-private-storage `noexec` restriction. `../app/build.gradle.kts` also sets
+`packaging.jniLibs.useLegacyPackaging = true` so the file is actually
+extracted to disk at install time rather than left zipped in the APK.
 
 ## Next steps (see also ../PROJECT.md)
 
-1. Prototype QR-login + receiving messages standalone on desktop first
-   (`whatsmeow`'s [package example](https://pkg.go.dev/go.mau.fi/whatsmeow#example-package)
-   is a complete minimal client) — validate against a real WhatsApp account
-   before touching Android at all.
-2. Cross-compile for `android/arm64`:
-   ```
-   CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o whatsmeow-core .
-   ```
-   Confirm the resulting binary actually runs under `adb shell` on the
-   LightOS emulator / real device — Photon's docs note pending
-   hardware-verification gaps, don't assume parity with desktop Go.
-3. Design the IPC contract with `../tool` (message schema for
-   incoming/outgoing chat events, QR pairing hand-off, connection state).
-   Localhost websocket (Photon's choice) is the path of least resistance.
-4. Session/key store: SQLite via `modernc.org/sqlite` (already wired up),
-   same as Photon — avoids CGO/NDK entirely.
+1. On-device verification: confirm the subprocess actually runs under
+   `../app` on the LightOS emulator / real device (cross-compile output has
+   been confirmed to be a valid ARM aarch64 ELF, but not yet exercised
+   on-device) — Photon's docs note pending hardware-verification gaps,
+   don't assume parity with desktop Go.
+2. Chat/message events: extend the stdout protocol (or move to a
+   bidirectional local socket — Photon's choice) once `../app` needs to
+   receive/send actual messages, not just complete login.
+3. Persistent connection: `main.go` currently exits when its stdin/parent
+   process goes away, matching `../app`'s Activity-scoped subprocess
+   lifetime. Real-time delivery needs this paired with a foreground service
+   on the Android side (see `../PROJECT.md` next steps).
 
 ## Known risks specific to this module
 
