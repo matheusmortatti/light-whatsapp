@@ -474,16 +474,7 @@ func handleHistorySync(ctx context.Context, client *whatsmeow.Client, hs *events
 			name = existing.Name
 		}
 		if name == "" {
-			if contact, err := client.Store.Contacts.GetContact(ctx, jid); err == nil && contact.Found {
-				switch {
-				case contact.FullName != "":
-					name = contact.FullName
-				case contact.PushName != "":
-					name = contact.PushName
-				case contact.BusinessName != "":
-					name = contact.BusinessName
-				}
-			}
+			name = contactName(ctx, client, jid)
 		}
 		if name == "" {
 			name = jid.User
@@ -544,7 +535,10 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	chatsMu.Lock()
 	c, ok := chats[jid.String()]
 	if !ok {
-		name := evt.Info.PushName
+		name := contactName(ctx, client, jid)
+		if name == "" {
+			name = evt.Info.PushName
+		}
 		if name == "" {
 			name = jid.User
 		}
@@ -590,6 +584,77 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	if msgType == "image" && img != nil {
 		go downloadImage(ctx, client, logger, messages, jid.String(), cm)
 	}
+}
+
+// contactName looks up the best display name whatsmeow's contact store has
+// for jid: the phone's address-book name if synced, else the contact's
+// self-set push name, else their business name. Returns "" if nothing is
+// known yet — callers fall back to the raw phone number in that case.
+func contactName(ctx context.Context, client *whatsmeow.Client, jid types.JID) string {
+	contact, err := client.Store.Contacts.GetContact(ctx, jid)
+	if err != nil || !contact.Found {
+		return ""
+	}
+	switch {
+	case contact.FullName != "":
+		return contact.FullName
+	case contact.PushName != "":
+		return contact.PushName
+	case contact.BusinessName != "":
+		return contact.BusinessName
+	default:
+		return ""
+	}
+}
+
+// reconcileContactNames re-resolves every cached 1:1 chat's name against
+// the (local, no-network) contact store, upgrading any that were cached
+// before their contact's name was known. See refreshContactName for the
+// live-event counterpart that keeps this correct as new names arrive.
+func reconcileContactNames(ctx context.Context, client *whatsmeow.Client, chats map[string]chatSummary) {
+	for jidStr, c := range chats {
+		if c.IsGroup {
+			continue
+		}
+		jid, err := types.ParseJID(jidStr)
+		if err != nil {
+			continue
+		}
+		name := contactName(ctx, client, jid)
+		if name == "" || name == c.Name {
+			continue
+		}
+		c.Name = name
+		chats[jidStr] = c
+	}
+}
+
+// refreshContactName re-resolves a 1:1 chat's display name against the
+// contact store and emits an updated chat list if it improved. Contact
+// names (address-book sync, push names) routinely arrive after the chat
+// list is first built from history sync, so a chat initially falls back to
+// showing the raw phone number until this backfills it.
+func refreshContactName(ctx context.Context, client *whatsmeow.Client, jid types.JID, chats map[string]chatSummary) {
+	if jid.Server == types.GroupServer {
+		return
+	}
+	name := contactName(ctx, client, jid)
+	if name == "" {
+		return
+	}
+
+	chatsMu.Lock()
+	c, ok := chats[jid.String()]
+	if !ok || c.Name == name {
+		chatsMu.Unlock()
+		return
+	}
+	c.Name = name
+	chats[jid.String()] = c
+	list := saveChats(chats)
+	chatsMu.Unlock()
+
+	emit(event{Type: "chats", Chats: list})
 }
 
 // fetchGroupNames resolves group subjects that history sync never sends
@@ -670,12 +735,19 @@ func main() {
 	}
 
 	chats := loadCachedChats()
-	if len(chats) > 0 {
-		emit(event{Type: "chats", Chats: saveChats(chats)})
-	}
 	messages := make(map[string][]chatMessage)
 
 	client := whatsmeow.NewClient(deviceStore, logger)
+
+	// Contact names (address-book sync, push names) often arrive after a
+	// chat was first cached, so a chat can get stuck showing the raw phone
+	// number forever once written to disk with no live event to correct
+	// it. The contact store is local (no network needed), so re-resolve
+	// every cached 1:1 chat's name against it before the first emit.
+	if len(chats) > 0 {
+		reconcileContactNames(ctx, client, chats)
+		emit(event{Type: "chats", Chats: saveChats(chats)})
+	}
 	client.AddEventHandler(func(evt any) {
 		switch e := evt.(type) {
 		case *events.Connected:
@@ -688,6 +760,10 @@ func main() {
 			handleHistorySync(ctx, client, e, chats, messages)
 		case *events.Message:
 			handleMessage(ctx, client, logger, e, chats, messages)
+		case *events.Contact:
+			refreshContactName(ctx, client, e.JID, chats)
+		case *events.PushName:
+			refreshContactName(ctx, client, e.JID, chats)
 		}
 	})
 	go readCommands(ctx, client, logger, messages)
