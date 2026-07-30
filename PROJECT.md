@@ -53,24 +53,68 @@ services. Not a blocker for this project (open-source, personal use, not
 distributing through Light's store), but it's a deliberate scope choice,
 not an oversight.
 
+**Why `app/` instead of building this inside `tool/`?** Originally assumed
+`tool/` could host the foreground service supervising `core/`'s subprocess.
+Turns out the `light-sdk` Gradle plugin (`plugin/.../LightSdkPlugin.kt`,
+`LightToolMetadata.kt`, `ManifestGenerator.kt`) makes this structurally
+impossible for any module that applies it: the generated manifest only ever
+emits `LightSdkApplication`/`LightActivity`/`LightSdkReceiver` (no `<service>`
+slot, and a hand-written manifest is explicitly rejected by
+`validateNoUserManifest`); the permission allowlist
+(`LightToolPolicy.ALLOWED_PERMISSIONS`) has no `FOREGROUND_SERVICE`; and the
+plugin's source scanner blocks `android.app.Service`, `startService(`,
+`bindService(`, `getSystemService(` in any `tool/src` file. None of that
+machinery applies to a module that doesn't apply the plugin (`sdk/ui` proves
+this — no plugin, no restrictions). So `app/` is a plain Android app module
+(no `light-sdk` plugin, own manifest, free dependency choices), reusing
+`sdk/ui`'s Compose components for visual parity but not built through the
+plugin — sideloaded directly instead. `tool/` is left alone as the
+upstream-tracking scaffold it already was.
+
+**Discoverability gotcha found afterward:** LightOS doesn't find Tools via
+the standard Android LAUNCHER intent-filter — it scans installed packages
+for a specific no-op `BroadcastReceiver` marker
+(`ACTION_SDK_MARKER`/`SDK_VERSION` metadata, see
+`sdk/server/.../LightSdkServer.kt:77-106`), which the light-sdk plugin
+normally injects (`LightSdkReceiver`) and which a plain sideloaded APK
+therefore lacks — true at every `ClientFilterLevel` including the
+permissive "Any tools" tier, since that only relaxes the check *after* the
+marker query already ran. Fix: `app/` hand-declares that same marker
+(`SdkMarkerReceiver.kt` + the matching `<receiver>` in
+`AndroidManifest.xml`) — it's an inert manifest-only contract, doesn't
+require adopting the rest of the plugin's restrictions. Without it, the app
+still installs and runs fine, just isn't listed in LightOS's own tool
+switcher (`adb shell am start` still works as a fallback). Unverified
+against real LightOS at time of writing — only checked against the shared
+`sdk/server` discovery code and the emulator, not real hardware.
+
 ## Architecture
 
 ```
-tool/ (Kotlin, Compose, light-sdk)  <-- localhost socket -->  core/ (Go, whatsmeow)
-     LightScreen-based UI                                       WhatsApp multi-device
-     foreground service supervises                              protocol + E2EE
-     the core/ subprocess                                       SQLite session store
+app/ (Kotlin, Compose, plain Android app)  <-- stdout JSON events -->  core/ (Go, whatsmeow)
+     Activity-scoped subprocess supervision                              WhatsApp multi-device
+     (persistent foreground service is chat-phase work)                  protocol + E2EE
+     reuses sdk/ui for visual parity, not a light-sdk Tool               SQLite session store
 ```
 
 - **`core/`**: Go module, whatsmeow-based, cross-compiled `CGO_ENABLED=0` for
-  `android/arm64`, run as a subprocess. See `core/README.md`.
-- **`tool/`**: the light-sdk Android tool module — currently still Light's
-  sample scaffold (`HomeScreen`/`DetailScreen`/`ToolEntryPoint`). This is
-  where the chat-list/thread UI and the foreground service that owns the
-  `core/` subprocess will go.
-- IPC contract between the two is not yet designed — reference Photon's
-  implementation (same problem, same device, MIT licensed) before
-  inventing one from scratch.
+  `android/arm64` via `core/build_android.sh`, run as a subprocess. See
+  `core/README.md`.
+- **`app/`**: standalone Android app module (deliberately *not* a
+  `light-sdk` Tool — see decision log above). Launches `core/`'s binary
+  (bundled as `app/src/main/jniLibs/arm64-v8a/libwhatsmeowcore.so` so
+  Android extracts it to disk as an executable "native lib"), reads its
+  stdout JSON-event protocol, and renders a QR-login screen using `sdk/ui`
+  Compose components. Currently QR-login only, subprocess lifetime scoped
+  to the Activity — no persistent foreground service yet.
+- **`tool/`**: still Light's unmodified sample scaffold
+  (`HomeScreen`/`DetailScreen`/`ToolEntryPoint`), kept only for tracking
+  upstream `light-sdk` changes. Not used by this project's actual app.
+- IPC for this phase is one-directional and simple: `core/main.go` emits
+  newline-delimited JSON on stdout (`{"type":"qr",...}` /
+  `{"type":"connected",...}` / etc.), human-readable logs go to stderr. A
+  richer bidirectional contract (Photon-style local socket, needed once
+  `core/` has to push incoming messages) is deferred to the chat-UI phase.
 
 ## Repo layout / remotes
 
@@ -99,7 +143,19 @@ new, ours, not part of upstream.
 - **LightOS emulator**: Android emulator, API 34, 1080×1240, no Google Play
   Services — see `docs/system_app` (from upstream) for the "system app"
   setup needed to test push/permissions. Or real Light Phone III hardware
-  via ADB sideload.
+  via ADB sideload. Two gotchas hit setting this up (2026-07-29) that the
+  upstream doc doesn't call out, noted here since `docs/` is upstream and we
+  don't edit it directly:
+  - The `google_apis` system-image tag is signed `dev-keys`, not
+    `test-keys` — the platform-signing step needs `default` (pure AOSP,
+    no Google APIs) instead, e.g.
+    `system-images;android-34;default;arm64-v8a`. Check with
+    `adb shell getprop ro.build.description`.
+  - The emulator's default "Allowed Tools" setting is "Community Tools",
+    which filters out unsigned sideloaded apps regardless of the
+    `ACTION_SDK_MARKER` receiver being present. In the emulator app:
+    swipe/dpad to Settings → Allowed Tools → "All Tools" to see `app/`
+    listed and launchable from LightOS's own tool switcher.
 - **whatsmeow** (MPL-2.0) + **modernc.org/sqlite** (pure-Go, no CGO) —
   already wired into `core/go.mod`.
 
@@ -121,16 +177,32 @@ new, ours, not part of upstream.
 
 ## Next steps, in order
 
-1. Get the light-sdk emulator running locally, confirm the unmodified
-   sample `tool/` builds and launches (validates the whole toolchain before
-   touching any WhatsApp code).
-2. In `core/`, prototype whatsmeow QR-login + send/receive standalone on
-   desktop Go, against a real WhatsApp account — validate the library
-   works for your account before involving Android at all.
-3. Cross-compile `core/` for `android/arm64`, confirm it actually runs via
-   `adb shell` on the emulator/device.
-4. Design the IPC contract between `tool/` and `core/` (reference Photon).
-5. Build the foreground service in `tool/` that launches and supervises the
-   `core/` subprocess.
-6. Repurpose `HomeScreen`/`DetailScreen` into chat-list/thread screens.
-7. Media handling, then groups, then polish — in that order.
+1. ~~Get the light-sdk emulator running locally, confirm the unmodified
+   sample `tool/` builds and launches~~ — done, see `docs/system_app`.
+2. ~~In `core/`, prototype whatsmeow QR-login + send/receive standalone on
+   desktop Go, against a real WhatsApp account~~ — done, `core/main.go`.
+3. ~~Cross-compile `core/` for `android/arm64`~~ — done,
+   `core/build_android.sh`; confirmed on-device (2026-07-29, LightOS
+   emulator) that the binary actually executes as a subprocess.
+4. ~~Design the IPC contract~~ — done for this phase: stdout JSON-lines
+   protocol, see Architecture above. (Bidirectional/socket-based IPC still
+   TBD for the chat phase.)
+5. ~~`app/` scaffolded... needs on-device verification~~ — done
+   (2026-07-29): built, installed on the LightOS emulator, **discovered and
+   launched via LightOS's own tool switcher** (not just `adb shell am
+   start` — the `ACTION_SDK_MARKER` receiver works), subprocess launched
+   and connected to WhatsApp's servers, real QR code rendered on-screen.
+   Along the way, found and fixed a real bug: Android has no usable
+   `/etc/resolv.conf`, so Go's pure-Go DNS resolver (required — no cgo/NDK)
+   failed every lookup; fixed by pointing `net.DefaultResolver` at a public
+   DNS server directly (see `core/main.go`'s `init()`). This would have hit
+   real LP3 hardware too, not just the emulator. Still unverified: actually
+   scanning the QR with a phone and confirming "connected as `<JID>`", and
+   confirming reconnect-without-QR on relaunch — needs a human to scan.
+6. Persistent connection: replace the Activity-scoped subprocess lifetime
+   with a real foreground service (notification channel, Doze/battery
+   handling) once real-time message delivery is needed.
+7. Chat UI: repurpose/extend `app/`'s screens into a chat-list/thread UI,
+   fed by `core/` message events (requires extending the stdout protocol or
+   moving to a bidirectional socket — reference Photon).
+8. Media handling, then groups, then polish — in that order.
