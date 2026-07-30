@@ -155,16 +155,65 @@ private fun LoginScreen(state: LoginState) {
 
 @Composable
 private fun ChatListScreen(chats: List<Chat>, onChatClick: (Chat) -> Unit) {
+    // Fullscreen text entry (searching) vs. an applied filter (query) are
+    // tracked separately, same split as ChatDetailScreen's composing flow:
+    // the keyboard editor closes on submit, but the filter it produced stays
+    // applied until explicitly cleared.
+    var searching by rememberSaveable { mutableStateOf(false) }
+    var query by rememberSaveable { mutableStateOf("") }
+
+    BackHandler(enabled = searching || query.isNotBlank()) {
+        if (searching) searching = false else query = ""
+    }
+
+    if (searching) {
+        val textState = rememberTextFieldState(query)
+        val keyboardOptionsFlow = remember { MutableStateFlow(defaultKeyboardOptions()) }
+        LightTextInputEditor(
+            title = "Search",
+            state = textState,
+            keyboardOptionsFlow = keyboardOptionsFlow,
+            submitLabel = "SEARCH",
+            singleLine = true,
+            onSubmit = { text ->
+                query = text.toString().trim()
+                searching = false
+            },
+            onBack = { searching = false },
+            modifier = Modifier.background(LightThemeTokens.colors.background),
+        )
+        return
+    }
+
+    val filteredChats = remember(chats, query) {
+        if (query.isBlank()) chats else chats.filter { it.name.contains(query, ignoreCase = true) }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(LightThemeTokens.colors.background),
     ) {
-        LightText(
-            text = "WhatsApp",
-            variant = LightTextVariant.Heading,
-            modifier = Modifier.padding(horizontal = 32.dp, vertical = 16.dp),
+        LightTopBar(
+            center = LightTopBarCenter.Text("WhatsApp"),
+            rightButton = if (query.isNotBlank()) {
+                LightBarButton.LightIcon(icon = LightIcons.CLOSE, onClick = { query = "" })
+            } else {
+                LightBarButton.LightIcon(icon = LightIcons.SEARCH, onClick = { searching = true })
+            },
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         )
+
+        if (query.isNotBlank()) {
+            LightText(
+                text = "Results for \"$query\"",
+                variant = LightTextVariant.Detail,
+                lighten = true,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 32.dp, vertical = 4.dp),
+            )
+        }
 
         if (chats.isEmpty()) {
             Box(
@@ -179,6 +228,19 @@ private fun ChatListScreen(chats: List<Chat>, onChatClick: (Chat) -> Unit) {
                     lighten = true,
                 )
             }
+        } else if (filteredChats.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center,
+            ) {
+                LightText(
+                    text = "No chats found",
+                    variant = LightTextVariant.Copy,
+                    lighten = true,
+                )
+            }
         } else {
             LightScrollView(
                 modifier = Modifier
@@ -186,7 +248,7 @@ private fun ChatListScreen(chats: List<Chat>, onChatClick: (Chat) -> Unit) {
                     .fillMaxWidth()
                     .padding(horizontal = 32.dp),
             ) {
-                chats.forEach { chat ->
+                filteredChats.forEach { chat ->
                     ChatRow(
                         chat = chat,
                         modifier = Modifier
