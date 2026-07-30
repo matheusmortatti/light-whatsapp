@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:label="WhatsApp"
+        android:allowBackup="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Marker so LightOS's tool switcher discovers this app — see
+             SdkMarkerReceiver.kt for why this exists despite app/ not
+             using the light-sdk Gradle plugin. -->
+        <receiver
+            android:name=".SdkMarkerReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.thelightphone.sdk.ACTION_SDK_MARKER" />
+            </intent-filter>
+            <meta-data
+                android:name="com.thelightphone.sdk.SDK_VERSION"
+                android:value="0.0.13" />
+        </receiver>
+
+    </application>
+
+</manifest>

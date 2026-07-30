@@ -56,3 +56,6 @@ __pycache__/
 core/*.db
 core/*.db-shm
 core/*.db-wal
+
+# cross-compiled by core/build_android.sh, not source
+app/src/main/jniLibs/
