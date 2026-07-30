@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,12 +17,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.State
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
@@ -49,6 +52,7 @@ import com.thelightphone.sdk.ui.lightClickable
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.withContext
 
 // Not a light-sdk Tool (no LightScreen/LightActivity/@InitialScreen) — this
@@ -202,6 +206,25 @@ private fun ChatDetailScreen(
     var composing by rememberSaveable(chat.jid) { mutableStateOf(false) }
     BackHandler(onBack = { if (composing) composing = false else onBack() })
 
+    // Fresh state per chat so switching chats doesn't inherit scroll position.
+    val scrollState = remember(chat.jid) { ScrollState(0) }
+    // ScrollState.maxValue starts as a placeholder (Int.MAX_VALUE) until the
+    // first layout measures real content, so that transition is a decrease,
+    // not a growth event — handle it separately from the steady-state chase
+    // below (which handles content growing further afterward, e.g. images
+    // decoding async once we're already pinned to the bottom).
+    LaunchedEffect(chat.jid) {
+        var lastMax = -1
+        snapshotFlow { scrollState.maxValue }
+            .filter { it != Int.MAX_VALUE }
+            .collect { newMax ->
+                if (lastMax == -1 || (newMax > lastMax && scrollState.value >= lastMax)) {
+                    scrollState.scrollTo(newMax)
+                }
+                lastMax = newMax
+            }
+    }
+
     if (composing) {
         val textState = rememberTextFieldState("")
         val keyboardOptionsFlow = remember { MutableStateFlow(defaultKeyboardOptions()) }
@@ -250,6 +273,7 @@ private fun ChatDetailScreen(
                     .weight(1f)
                     .fillMaxWidth()
                     .padding(horizontal = 24.dp),
+                scrollState = scrollState,
             ) {
                 messages.forEach { message ->
                     MessageRow(
