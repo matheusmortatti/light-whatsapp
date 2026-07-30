@@ -928,6 +928,58 @@ func sanitizeChats(ctx context.Context, client *whatsmeow.Client, chats map[stri
 	}
 }
 
+// sanitizeMessageCache folds any on-disk message cache left over under a
+// non-canonical JID (see canonicalizeChatJID) into its canonical JID's
+// cache. Message caches are per-JID files keyed by the exact JID a chat was
+// addressed under at the time, so a contact whose chat forked into a
+// LID-keyed and a phone-number-keyed entry also left behind two separate
+// message histories; without this merge, collapsing the chat-list entries
+// (sanitizeChats) would silently orphan whichever JID's messages the app no
+// longer looks up. Must run before anything reads from messagesDir.
+func sanitizeMessageCache(ctx context.Context, client *whatsmeow.Client) {
+	entries, err := os.ReadDir(messagesDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		jidStr := strings.TrimSuffix(name, ".json")
+		jid, err := types.ParseJID(jidStr)
+		if err != nil {
+			continue
+		}
+		canonical := canonicalizeChatJID(ctx, client, jid)
+		if canonical.String() == jidStr {
+			continue
+		}
+
+		stale := loadCachedMessages(jidStr)
+		if len(stale) > 0 {
+			merged := loadCachedMessages(canonical.String())
+			seen := make(map[string]bool, len(merged))
+			for _, m := range merged {
+				seen[m.ID] = true
+			}
+			for _, m := range stale {
+				if seen[m.ID] {
+					continue
+				}
+				seen[m.ID] = true
+				merged = append(merged, m)
+			}
+			sort.Slice(merged, func(i, j int) bool { return merged[i].Timestamp < merged[j].Timestamp })
+			if len(merged) > maxMessagesPerChat {
+				merged = merged[len(merged)-maxMessagesPerChat:]
+			}
+			saveMessages(canonical.String(), merged)
+		}
+		os.Remove(messagesFilePath(jidStr))
+	}
+}
+
 // handleHistorySync folds one history-sync chunk's conversations into chats
 // and emits the updated snapshot. WhatsApp sends this in multiple chunks
 // (bootstrap, recent, push-name, ...) so this is called once per chunk and
@@ -1245,6 +1297,7 @@ func main() {
 
 	client := whatsmeow.NewClient(deviceStore, logger)
 	sanitizeChats(ctx, client, chats)
+	sanitizeMessageCache(ctx, client)
 
 	// Contact names (address-book sync, push names) often arrive after a
 	// chat was first cached, so a chat can get stuck showing the raw phone
