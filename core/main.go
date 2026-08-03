@@ -654,6 +654,38 @@ func markChatReadAndClearUnread(ctx context.Context, client *whatsmeow.Client, l
 	emit(event{Type: "chats", Chats: updated})
 }
 
+// handleReadReceipt reacts to a *events.Receipt telling us WhatsApp's own
+// sync mechanism, not the app, marked a chat read: when another linked
+// device opens a chat, WhatsApp sends every other device (including this
+// one) a receipt from our own JID with ReceiptTypeRead (or ReceiptTypeSelf
+// if the account has read receipts disabled) and the chat that was read in
+// the "recipient" attribute — surfaced by whatsmeow as source.Chat with
+// source.IsFromMe set (see parseMessageSource). Receipts for messages we
+// sent being read by the other party look the same shape-wise except
+// IsFromMe is false, so that's the filter that keeps this from firing on
+// every incoming read receipt. No MarkRead call here — the other device
+// already told the server, so this only needs to update local state.
+func handleReadReceipt(ctx context.Context, client *whatsmeow.Client, evt *events.Receipt, chats map[string]chatSummary) {
+	if !evt.MessageSource.IsFromMe || (evt.Type != types.ReceiptTypeRead && evt.Type != types.ReceiptTypeReadSelf) {
+		return
+	}
+	jid := canonicalizeChatJID(ctx, client, evt.MessageSource.Chat)
+	jidStr := jid.String()
+
+	chatsMu.Lock()
+	c, ok := chats[jidStr]
+	if !ok || c.UnreadCount == 0 {
+		chatsMu.Unlock()
+		return
+	}
+	c.UnreadCount = 0
+	chats[jidStr] = c
+	updated := saveChats(chats)
+	chatsMu.Unlock()
+
+	emit(event{Type: "chats", Chats: updated})
+}
+
 // handleOpenChat responds to the app requesting one chat's messages: emits
 // what's already known (from history sync and/or prior live messages)
 // immediately, then downloads any images in that batch that haven't been
@@ -1320,6 +1352,8 @@ func main() {
 			handleHistorySync(ctx, client, e, chats, messages)
 		case *events.Message:
 			handleMessage(ctx, client, logger, e, chats, messages)
+		case *events.Receipt:
+			handleReadReceipt(ctx, client, e, chats)
 		case *events.Contact:
 			refreshContactName(ctx, client, e.JID, chats)
 		case *events.PushName:
