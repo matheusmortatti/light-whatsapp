@@ -13,7 +13,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,6 +23,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -57,7 +59,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.thelightphone.sdk.ui.LightBarButton
 import com.thelightphone.sdk.ui.LightIcon
 import com.thelightphone.sdk.ui.LightIcons
-import com.thelightphone.sdk.ui.LightScrollView
+import com.thelightphone.sdk.ui.LightLazyScrollView
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextField
 import com.thelightphone.sdk.ui.LightTextInputEditor
@@ -77,7 +79,6 @@ import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.withContext
 
 // Not a light-sdk Tool (no LightScreen/LightActivity/@InitialScreen) — this
@@ -259,12 +260,13 @@ private fun ChatListScreen(chats: List<Chat>, onChatClick: (Chat) -> Unit) {
                 )
             }
         } else {
-            LightScrollView(
+            LightLazyScrollView(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
+                uniformItemHeightGridUnits = CHAT_ROW_HEIGHT_GRID_UNITS,
             ) {
-                filteredChats.forEach { chat ->
+                items(filteredChats, key = { it.jid }) { chat ->
                     ChatRow(
                         chat = chat,
                         modifier = Modifier
@@ -276,6 +278,12 @@ private fun ChatListScreen(chats: List<Chat>, onChatClick: (Chat) -> Unit) {
         }
     }
 }
+
+// A single-line Copy row (30sp text, lineHeight 1.5x) plus its 12dp top/bottom
+// padding — used only for LightLazyScrollView's scrollbar-geometry estimate,
+// not enforced as an actual row height, so a little drift here just means the
+// scrollbar thumb tracks approximately rather than exactly.
+private const val CHAT_ROW_HEIGHT_GRID_UNITS = 2.6f
 
 @Composable
 private fun ChatRow(chat: Chat, modifier: Modifier = Modifier) {
@@ -340,22 +348,50 @@ private fun ChatDetailScreen(
     })
 
     // Fresh state per chat so switching chats doesn't inherit scroll position.
-    val scrollState = remember(chat.jid) { ScrollState(0) }
-    // ScrollState.maxValue starts as a placeholder (Int.MAX_VALUE) until the
-    // first layout measures real content, so that transition is a decrease,
-    // not a growth event — handle it separately from the steady-state chase
-    // below (which handles content growing further afterward, e.g. images
-    // decoding async once we're already pinned to the bottom).
+    val listState = remember(chat.jid) { LazyListState() }
+    // Tracks how many messages were on screen the last time we auto-scrolled,
+    // so a later growth (e.g. a new incoming message) only re-chases the
+    // bottom if the user was already viewing up to the previous last message
+    // — not if they'd scrolled up to read history.
+    var lastAppliedCount by remember(chat.jid) { mutableStateOf(0) }
+    LaunchedEffect(chat.jid, messages.size) {
+        val size = messages.size
+        if (size == 0) return@LaunchedEffect
+        val previousLastIndex = lastAppliedCount - 1
+        val wasAtBottom = lastAppliedCount == 0 ||
+            (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1) >= previousLastIndex
+        if (wasAtBottom) {
+            listState.scrollToItem(size - 1)
+        }
+        lastAppliedCount = size
+    }
+
+    // Catches a message growing IN PLACE after we've already pinned to it —
+    // e.g. an image message's row is short ("[Photo]" placeholder text)
+    // until its bitmap finishes decoding async (see rememberDecodedImage),
+    // at which point the row grows and the true bottom moves further down
+    // than where we last scrolled to. The message-count effect above can't
+    // see this: nothing was added, an existing item just got taller.
+    //
+    // Distinguished from the user manually scrolling away by watching the
+    // viewport's top anchor (firstVisibleItemIndex/ScrollOffset): a manual
+    // scroll always moves it, a later item silently growing off-screen
+    // doesn't. Only chase when the anchor held steady since the last check
+    // and there's now unseen content below (canScrollForward).
     LaunchedEffect(chat.jid) {
-        var lastMax = -1
-        snapshotFlow { scrollState.maxValue }
-            .filter { it != Int.MAX_VALUE }
-            .collect { newMax ->
-                if (lastMax == -1 || (newMax > lastMax && scrollState.value >= lastMax)) {
-                    scrollState.scrollTo(newMax)
-                }
-                lastMax = newMax
+        var anchorIndex = -1
+        var anchorOffset = -1
+        snapshotFlow {
+            Triple(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, listState.canScrollForward)
+        }.collect { (firstIndex, firstOffset, canScrollForward) ->
+            val anchorUnchanged = firstIndex == anchorIndex && firstOffset == anchorOffset
+            if (anchorUnchanged && canScrollForward) {
+                val lastIndex = listState.layoutInfo.totalItemsCount - 1
+                if (lastIndex >= 0) listState.scrollToItem(lastIndex)
             }
+            anchorIndex = listState.firstVisibleItemIndex
+            anchorOffset = listState.firstVisibleItemScrollOffset
+        }
     }
 
     if (composing) {
@@ -424,13 +460,14 @@ private fun ChatDetailScreen(
                 )
             }
         } else {
-            LightScrollView(
+            LightLazyScrollView(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
-                scrollState = scrollState,
+                listState = listState,
+                uniformItemHeightGridUnits = MESSAGE_ROW_HEIGHT_GRID_UNITS,
             ) {
-                messages.forEachIndexed { index, message ->
+                itemsIndexed(messages, key = { _, message -> message.id }) { index, message ->
                     val previous = messages.getOrNull(index - 1)
                     val sameSender = previous != null &&
                         previous.fromMe == message.fromMe &&
@@ -439,31 +476,33 @@ private fun ChatDetailScreen(
                         (message.timestamp - previous.timestamp) <= MESSAGE_CLUSTER_WINDOW_SECONDS
                     val dateChanged = previous == null || !isSameLocalDate(previous.timestamp, message.timestamp)
                     val showHeader = dateChanged || !(sameSender && withinClusterWindow)
-                    if (dateChanged) {
-                        DateSeparator(
-                            timestampSeconds = message.timestamp,
+                    Column {
+                        if (dateChanged) {
+                            DateSeparator(
+                                timestampSeconds = message.timestamp,
+                                modifier = Modifier.padding(
+                                    start = 24.dp,
+                                    end = 24.dp,
+                                    top = if (index == 0) 0.dp else 16.dp,
+                                ),
+                            )
+                        }
+                        MessageRow(
+                            message = message,
+                            isGroup = chat.isGroup,
+                            chatName = chat.name,
+                            showHeader = showHeader,
                             modifier = Modifier.padding(
                                 start = 24.dp,
                                 end = 24.dp,
-                                top = if (index == 0) 0.dp else 16.dp,
+                                // Must clear Copy's own wrapped-line leading
+                                // (fontSize * 1.5 lineHeight, ~10-12dp on this
+                                // screen) or separate clustered messages read as
+                                // one wrapped message.
+                                top = if (showHeader) 14.dp else 9.dp,
                             ),
                         )
                     }
-                    MessageRow(
-                        message = message,
-                        isGroup = chat.isGroup,
-                        chatName = chat.name,
-                        showHeader = showHeader,
-                        modifier = Modifier.padding(
-                            start = 24.dp,
-                            end = 24.dp,
-                            // Must clear Copy's own wrapped-line leading
-                            // (fontSize * 1.5 lineHeight, ~10-12dp on this
-                            // screen) or separate clustered messages read as
-                            // one wrapped message.
-                            top = if (showHeader) 14.dp else 9.dp,
-                        ),
-                    )
                 }
             }
         }
@@ -504,6 +543,12 @@ private const val RECORDING_TIMER_TICK_MS = 200L
 // clustered under one header; a longer gap starts a fresh one even if the
 // sender hasn't changed.
 private const val MESSAGE_CLUSTER_WINDOW_SECONDS = 5 * 60L
+
+// Rough average of a clustered (headerless, one-line) message row, used only
+// for LightLazyScrollView's scrollbar-geometry estimate — actual rows vary
+// (headers, date separators, multi-line/image/audio bodies), so the thumb
+// tracks approximately rather than exactly.
+private const val MESSAGE_ROW_HEIGHT_GRID_UNITS = 2.2f
 
 private val messageTimeFormatter = java.time.format.DateTimeFormatter.ofPattern("HH:mm")
 
