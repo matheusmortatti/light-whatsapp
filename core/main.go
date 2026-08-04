@@ -563,6 +563,16 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	if msgType == "sticker" && sticker != nil {
 		setStickerFields(&cm, sticker)
 	}
+	// A message we sent from a different linked device (e.g. the phone)
+	// arrives here with no status of its own — handleSendMessage/
+	// handleSendAudio only stamp "sent" for messages sent through *this*
+	// app. History sync carries the real delivery/read state WhatsApp
+	// already tracked for it, so use that instead of leaving it blank.
+	if key.GetFromMe() && jid.Server != types.GroupServer {
+		if s := webMessageInfoStatus(info.GetStatus()); s != "" {
+			cm.Status = s
+		}
+	}
 	if jid.Server == types.GroupServer && !key.GetFromMe() {
 		participant := key.GetParticipant()
 		if participant == "" {
@@ -963,6 +973,23 @@ func handleReadReceipt(ctx context.Context, client *whatsmeow.Client, evt *event
 	chatsMu.Unlock()
 
 	emit(event{Type: "chats", Chats: updated})
+}
+
+// webMessageInfoStatus maps a history-synced message's own WebMessageInfo.Status
+// (WhatsApp's real per-message delivery/read state, carried in the sync
+// payload itself) to the chatMessage.Status it implies — "" for PENDING/ERROR
+// (not yet meaningfully sent) or any status this app doesn't track.
+func webMessageInfoStatus(status waWeb.WebMessageInfo_Status) string {
+	switch status {
+	case waWeb.WebMessageInfo_SERVER_ACK:
+		return "sent"
+	case waWeb.WebMessageInfo_DELIVERY_ACK:
+		return "delivered"
+	case waWeb.WebMessageInfo_READ, waWeb.WebMessageInfo_PLAYED:
+		return "read"
+	default:
+		return ""
+	}
 }
 
 // receiptStatusFor maps evt to the chatMessage.Status it implies for a
@@ -1531,6 +1558,16 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 	if msgType == "sticker" && sticker != nil {
 		setStickerFields(&cm, sticker)
+	}
+	// Same gap as extractHistoryMessage: a message sent from another linked
+	// device arrives here live with no status. Unlike history sync, a live
+	// *events.Message carries no delivery/read state of its own — but its
+	// mere arrival means the server already has it, so "sent" is a safe
+	// starting point; handleSentMessageStatusReceipt upgrades it further as
+	// real receipts come in (applyMessageStatus doesn't require an existing
+	// status to do that).
+	if evt.Info.IsFromMe && !evt.Info.IsGroup {
+		cm.Status = "sent"
 	}
 	if evt.Info.IsGroup && !evt.Info.IsFromMe {
 		cm.Sender = evt.Info.Sender.String()

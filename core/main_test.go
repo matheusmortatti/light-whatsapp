@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -120,4 +121,26 @@ func TestExtractMessage(t *testing.T) {
 			t.Fatalf("extractMessage() = text=%q type=%q sticker=%v ok=%v", text, msgType, sticker, ok)
 		}
 	})
+}
+
+func TestWebMessageInfoStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		status waWeb.WebMessageInfo_Status
+		want   string
+	}{
+		{"server ack maps to sent", waWeb.WebMessageInfo_SERVER_ACK, "sent"},
+		{"delivery ack maps to delivered", waWeb.WebMessageInfo_DELIVERY_ACK, "delivered"},
+		{"read maps to read", waWeb.WebMessageInfo_READ, "read"},
+		{"played maps to read", waWeb.WebMessageInfo_PLAYED, "read"},
+		{"pending maps to unknown", waWeb.WebMessageInfo_PENDING, ""},
+		{"error maps to unknown", waWeb.WebMessageInfo_ERROR, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := webMessageInfoStatus(tt.status); got != tt.want {
+				t.Errorf("webMessageInfoStatus(%v) = %q, want %q", tt.status, got, tt.want)
+			}
+		})
+	}
 }
