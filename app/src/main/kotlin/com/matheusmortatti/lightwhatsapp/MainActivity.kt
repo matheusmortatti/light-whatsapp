@@ -8,6 +8,7 @@ import android.media.MediaPlayer
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
+import android.widget.VideoView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -52,6 +53,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.isSpecified
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -320,6 +322,12 @@ private fun ChatDetailScreen(
     val voiceRecorder = remember { VoiceRecorder(context) }
     DisposableEffect(Unit) { onDispose { voiceRecorder.cancel() } }
 
+    // Path (relative to context.filesDir) + loop flag of the video/gif
+    // currently open in the full-screen player, or null if none. Not
+    // rememberSaveable — re-opening from the thumbnail on process restart
+    // is cheap and there's no live player state worth restoring.
+    var playingVideo by remember(chat.jid) { mutableStateOf<Pair<String, Boolean>?>(null) }
+
     fun beginRecording() {
         val file = File(context.filesDir, "voice_tmp/${UUID.randomUUID()}.m4a")
         try {
@@ -342,6 +350,7 @@ private fun ChatDetailScreen(
 
     BackHandler(onBack = {
         when {
+            playingVideo != null -> playingVideo = null
             composing -> composing = false
             recording -> cancelRecording()
             else -> onBack()
@@ -437,6 +446,16 @@ private fun ChatDetailScreen(
         return
     }
 
+    playingVideo?.let { (path, loop) ->
+        VideoPlayerScreen(
+            chatName = chat.name,
+            relativePath = path,
+            loop = loop,
+            onClose = { playingVideo = null },
+        )
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -505,7 +524,7 @@ private fun ChatDetailScreen(
                             chatName = chat.name,
                             showHeader = showHeader || showStatus,
                             showStatus = showStatus,
-                            onPlayVideo = { _, _ -> },
+                            onPlayVideo = { path, loop -> playingVideo = path to loop },
                             modifier = Modifier.padding(
                                 start = 24.dp,
                                 end = 24.dp,
@@ -649,6 +668,49 @@ private fun RecordingScreen(
                     modifier = Modifier.padding(top = 4.dp),
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun VideoPlayerScreen(
+    chatName: String,
+    relativePath: String,
+    loop: Boolean,
+    onClose: () -> Unit,
+) {
+    val context = LocalContext.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(LightThemeTokens.colors.background),
+    ) {
+        LightTopBar(
+            leftButton = LightBarButton.LightIcon(icon = LightIcons.CLOSE, onClick = onClose),
+            center = LightTopBarCenter.Text(chatName),
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    VideoView(ctx).apply {
+                        setVideoPath(File(context.filesDir, relativePath).absolutePath)
+                        setOnPreparedListener { mp ->
+                            mp.isLooping = loop
+                            start()
+                        }
+                        setOnErrorListener { _, what, extra ->
+                            Log.w("MainActivity", "video playback error: what=$what extra=$extra for $relativePath")
+                            true
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
         }
     }
 }
