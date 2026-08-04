@@ -3,8 +3,10 @@ package main
 import (
 	"testing"
 
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestReceiptStatusFor(t *testing.T) {
@@ -82,6 +84,40 @@ func TestApplyMessageStatus(t *testing.T) {
 		}
 		if list[0].Status != "" {
 			t.Errorf("list[0].Status should stay empty, got %q", list[0].Status)
+		}
+	})
+}
+
+func TestExtractMessage(t *testing.T) {
+	t.Run("video message", func(t *testing.T) {
+		msg := &waE2E.Message{VideoMessage: &waE2E.VideoMessage{Caption: proto.String("look")}}
+		text, msgType, _, _, video, sticker, ok := extractMessage(msg)
+		if !ok || msgType != "video" || text != "look" || video == nil || sticker != nil {
+			t.Fatalf("extractMessage() = text=%q type=%q video=%v sticker=%v ok=%v", text, msgType, video, sticker, ok)
+		}
+	})
+
+	t.Run("gif is a video message with GifPlayback set", func(t *testing.T) {
+		msg := &waE2E.Message{VideoMessage: &waE2E.VideoMessage{GifPlayback: proto.Bool(true)}}
+		_, msgType, _, _, video, _, ok := extractMessage(msg)
+		if !ok || msgType != "gif" || video == nil {
+			t.Fatalf("extractMessage() = type=%q video=%v ok=%v", msgType, video, ok)
+		}
+	})
+
+	t.Run("sticker message", func(t *testing.T) {
+		msg := &waE2E.Message{StickerMessage: &waE2E.StickerMessage{IsAnimated: proto.Bool(true)}}
+		_, msgType, _, _, _, sticker, ok := extractMessage(msg)
+		if !ok || msgType != "sticker" || sticker == nil {
+			t.Fatalf("extractMessage() = type=%q sticker=%v ok=%v", msgType, sticker, ok)
+		}
+	})
+
+	t.Run("lottie sticker falls back to unsupported", func(t *testing.T) {
+		msg := &waE2E.Message{StickerMessage: &waE2E.StickerMessage{IsLottie: proto.Bool(true)}}
+		text, msgType, _, _, _, sticker, ok := extractMessage(msg)
+		if !ok || msgType != "unsupported" || text != "lottie sticker" || sticker != nil {
+			t.Fatalf("extractMessage() = text=%q type=%q sticker=%v ok=%v", text, msgType, sticker, ok)
 		}
 	})
 }

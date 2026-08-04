@@ -128,6 +128,27 @@ type chatMessage struct {
 	AudioFileSHA256    []byte `json:"audio_file_sha256,omitempty"`
 	AudioFileEncSHA256 []byte `json:"audio_file_enc_sha256,omitempty"`
 	AudioMimetype      string `json:"audio_mimetype,omitempty"`
+
+	VideoPath          string `json:"video_path,omitempty"`    // path (relative to the working dir) once downloaded
+	VideoSeconds       uint32 `json:"video_seconds,omitempty"` // duration, known up front unlike images
+	IsGif              bool   `json:"is_gif,omitempty"`        // true if this "video" is WhatsApp's GIF encoding (VideoMessage.GifPlayback)
+
+	// Same deal as the Image*/Audio* fields above, but for video (see downloadVideo).
+	VideoDirectPath    string `json:"video_direct_path,omitempty"`
+	VideoMediaKey      []byte `json:"video_media_key,omitempty"`
+	VideoFileSHA256    []byte `json:"video_file_sha256,omitempty"`
+	VideoFileEncSHA256 []byte `json:"video_file_enc_sha256,omitempty"`
+	VideoMimetype      string `json:"video_mimetype,omitempty"`
+
+	StickerPath       string `json:"sticker_path,omitempty"`        // path (relative to the working dir) once downloaded
+	StickerIsAnimated bool   `json:"sticker_is_animated,omitempty"` // WhatsApp stickers are usually static or animated WebP
+
+	// Same deal again, but for stickers (see downloadSticker).
+	StickerDirectPath    string `json:"sticker_direct_path,omitempty"`
+	StickerMediaKey      []byte `json:"sticker_media_key,omitempty"`
+	StickerFileSHA256    []byte `json:"sticker_file_sha256,omitempty"`
+	StickerFileEncSHA256 []byte `json:"sticker_file_enc_sha256,omitempty"`
+	StickerMimetype      string `json:"sticker_mimetype,omitempty"`
 }
 
 // chatSummary is one entry of a "chats" event: a single conversation as
@@ -301,18 +322,27 @@ func upsertMessage(messages map[string][]chatMessage, jid string, msg chatMessag
 // unsupportedMessageLabel) rather than being dropped — the app shows it as
 // "Unsupported message: <label>" so at least its arrival is visible, even
 // though its content isn't.
-func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, audio *waE2E.AudioMessage, ok bool) {
+func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, audio *waE2E.AudioMessage, video *waE2E.VideoMessage, sticker *waE2E.StickerMessage, ok bool) {
 	for i := 0; i < 4 && m != nil; i++ {
 		switch {
 		case m.GetConversation() != "":
-			return m.GetConversation(), "text", nil, nil, true
+			return m.GetConversation(), "text", nil, nil, nil, nil, true
 		case m.GetExtendedTextMessage() != nil:
-			return m.GetExtendedTextMessage().GetText(), "text", nil, nil, true
+			return m.GetExtendedTextMessage().GetText(), "text", nil, nil, nil, nil, true
 		case m.GetImageMessage() != nil:
 			im := m.GetImageMessage()
-			return im.GetCaption(), "image", im, nil, true
+			return im.GetCaption(), "image", im, nil, nil, nil, true
 		case m.GetAudioMessage() != nil:
-			return "", "audio", nil, m.GetAudioMessage(), true
+			return "", "audio", nil, m.GetAudioMessage(), nil, nil, true
+		case m.GetVideoMessage() != nil:
+			vm := m.GetVideoMessage()
+			vType := "video"
+			if vm.GetGifPlayback() {
+				vType = "gif"
+			}
+			return vm.GetCaption(), vType, nil, nil, vm, nil, true
+		case m.GetStickerMessage() != nil && !m.GetStickerMessage().GetIsLottie():
+			return "", "sticker", nil, nil, nil, m.GetStickerMessage(), true
 		case m.GetEphemeralMessage() != nil:
 			m = m.GetEphemeralMessage().GetMessage()
 		case m.GetViewOnceMessage() != nil:
@@ -320,10 +350,10 @@ func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMes
 		case m.GetViewOnceMessageV2() != nil:
 			m = m.GetViewOnceMessageV2().GetMessage()
 		default:
-			return unsupportedMessageLabel(m), "unsupported", nil, nil, true
+			return unsupportedMessageLabel(m), "unsupported", nil, nil, nil, nil, true
 		}
 	}
-	return "", "", nil, nil, false
+	return "", "", nil, nil, nil, nil, false
 }
 
 // unsupportedMessageLabel names whichever content field is populated on m,
@@ -341,6 +371,9 @@ func unsupportedMessageLabel(m *waE2E.Message) string {
 	// separate "gif" content field to catch via the generic field walk below.
 	if vm := m.GetVideoMessage(); vm != nil && vm.GetGifPlayback() {
 		return "gif"
+	}
+	if sm := m.GetStickerMessage(); sm != nil && sm.GetIsLottie() {
+		return "lottie sticker"
 	}
 	v := reflect.ValueOf(m).Elem()
 	t := v.Type()
@@ -459,6 +492,32 @@ func setAudioFields(cm *chatMessage, audio *waE2E.AudioMessage) {
 	cm.AudioSeconds = audio.GetSeconds()
 }
 
+// setVideoFields is setImageFields' counterpart for video (and GIF, which
+// WhatsApp encodes as a VideoMessage with GifPlayback set — see
+// extractMessage) — fills in cm's persisted download reference from v, plus
+// its duration and whether it's a GIF.
+func setVideoFields(cm *chatMessage, v *waE2E.VideoMessage) {
+	cm.VideoDirectPath = v.GetDirectPath()
+	cm.VideoMediaKey = v.GetMediaKey()
+	cm.VideoFileSHA256 = v.GetFileSHA256()
+	cm.VideoFileEncSHA256 = v.GetFileEncSHA256()
+	cm.VideoMimetype = v.GetMimetype()
+	cm.VideoSeconds = v.GetSeconds()
+	cm.IsGif = v.GetGifPlayback()
+}
+
+// setStickerFields is setImageFields' counterpart for stickers — fills in
+// cm's persisted download reference from s, plus whether it's animated.
+// Lottie stickers never reach here (see extractMessage).
+func setStickerFields(cm *chatMessage, s *waE2E.StickerMessage) {
+	cm.StickerDirectPath = s.GetDirectPath()
+	cm.StickerMediaKey = s.GetMediaKey()
+	cm.StickerFileSHA256 = s.GetFileSHA256()
+	cm.StickerFileEncSHA256 = s.GetFileEncSHA256()
+	cm.StickerMimetype = s.GetMimetype()
+	cm.StickerIsAnimated = s.GetIsAnimated()
+}
+
 // extractHistoryMessage pulls one history-sync message into messages, if it's
 // a type the app renders (see extractMessage). Image media is noted but not
 // downloaded here — history sync can carry years of backlog, so downloading
@@ -472,7 +531,7 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	if waMsg == nil || key.GetID() == "" {
 		return
 	}
-	text, msgType, img, audio, ok := extractMessage(waMsg)
+	text, msgType, img, audio, video, sticker, ok := extractMessage(waMsg)
 	if !ok {
 		return
 	}
@@ -489,6 +548,12 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	}
 	if msgType == "audio" && audio != nil {
 		setAudioFields(&cm, audio)
+	}
+	if (msgType == "video" || msgType == "gif") && video != nil {
+		setVideoFields(&cm, video)
+	}
+	if msgType == "sticker" && sticker != nil {
+		setStickerFields(&cm, sticker)
 	}
 	if jid.Server == types.GroupServer && !key.GetFromMe() {
 		participant := key.GetParticipant()
@@ -634,6 +699,127 @@ func downloadAudio(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 				list[i].AudioFileSHA256 = nil
 				list[i].AudioFileEncSHA256 = nil
 				list[i].AudioMimetype = ""
+				break
+			}
+		}
+		messages[jid] = list
+		saveMessages(jid, list)
+	}
+	messagesMu.Unlock()
+
+	if ok {
+		emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
+	}
+}
+
+// videoExtension maps a media mimetype to a file extension; WhatsApp videos
+// (and GIFs, encoded as videos — see extractMessage) are almost always
+// MP4/H.264, so that's the fallback for anything unrecognized.
+func videoExtension(mimetype string) string {
+	switch {
+	case strings.Contains(mimetype, "3gpp"):
+		return "3gp"
+	default:
+		return "mp4"
+	}
+}
+
+func videoPath(jid, msgID, mimetype string) string {
+	return filepath.Join("media", jid, msgID+"."+videoExtension(mimetype))
+}
+
+// downloadVideo is downloadImage's counterpart for video/GIF messages:
+// fetches the media (using the persisted download reference set by
+// setVideoFields), writes it to disk, and updates the stored chatMessage
+// with the resulting path, re-emitting the chat's message list so the app
+// can render a thumbnail/player once it lands. Meant to run in its own
+// goroutine.
+func downloadVideo(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage, jid string, m chatMessage) {
+	data, err := client.DownloadMediaWithPath(ctx, m.VideoDirectPath, m.VideoFileEncSHA256, m.VideoFileSHA256, m.VideoMediaKey, whatsmeow.MediaVideo, "", false)
+	if err != nil {
+		logger.Warnf("failed to download video %s/%s: %v", jid, m.ID, err)
+		return
+	}
+	path := videoPath(jid, m.ID, m.VideoMimetype)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		logger.Warnf("failed to create media dir for %s: %v", jid, err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		logger.Warnf("failed to write video %s/%s: %v", jid, m.ID, err)
+		return
+	}
+
+	messagesMu.Lock()
+	list, ok := messages[jid]
+	if ok {
+		for i, cur := range list {
+			if cur.ID == m.ID {
+				list[i].VideoPath = path
+				list[i].VideoDirectPath = ""
+				list[i].VideoMediaKey = nil
+				list[i].VideoFileSHA256 = nil
+				list[i].VideoFileEncSHA256 = nil
+				list[i].VideoMimetype = ""
+				break
+			}
+		}
+		messages[jid] = list
+		saveMessages(jid, list)
+	}
+	messagesMu.Unlock()
+
+	if ok {
+		emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
+	}
+}
+
+// stickerExtension maps a media mimetype to a file extension; WhatsApp
+// stickers are almost always WebP (static or animated).
+func stickerExtension(mimetype string) string {
+	switch mimetype {
+	case "image/png":
+		return "png"
+	default:
+		return "webp"
+	}
+}
+
+func stickerPath(jid, msgID, mimetype string) string {
+	return filepath.Join("media", jid, msgID+"."+stickerExtension(mimetype))
+}
+
+// downloadSticker is downloadImage's counterpart for sticker messages.
+// Stickers download as whatsmeow.MediaImage (confirmed via whatsmeow's
+// classToMediaType map in download.go — there's no separate sticker media
+// type). Meant to run in its own goroutine.
+func downloadSticker(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage, jid string, m chatMessage) {
+	data, err := client.DownloadMediaWithPath(ctx, m.StickerDirectPath, m.StickerFileEncSHA256, m.StickerFileSHA256, m.StickerMediaKey, whatsmeow.MediaImage, "", false)
+	if err != nil {
+		logger.Warnf("failed to download sticker %s/%s: %v", jid, m.ID, err)
+		return
+	}
+	path := stickerPath(jid, m.ID, m.StickerMimetype)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		logger.Warnf("failed to create media dir for %s: %v", jid, err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		logger.Warnf("failed to write sticker %s/%s: %v", jid, m.ID, err)
+		return
+	}
+
+	messagesMu.Lock()
+	list, ok := messages[jid]
+	if ok {
+		for i, cur := range list {
+			if cur.ID == m.ID {
+				list[i].StickerPath = path
+				list[i].StickerDirectPath = ""
+				list[i].StickerMediaKey = nil
+				list[i].StickerFileSHA256 = nil
+				list[i].StickerFileEncSHA256 = nil
+				list[i].StickerMimetype = ""
 				break
 			}
 		}
@@ -840,6 +1026,8 @@ func handleOpenChat(ctx context.Context, client *whatsmeow.Client, logger waLog.
 	}
 	var toDownload []chatMessage
 	var toDownloadAudio []chatMessage
+	var toDownloadVideo []chatMessage
+	var toDownloadSticker []chatMessage
 	for _, m := range list {
 		if m.Type == "image" && m.ImagePath == "" && m.ImageDirectPath != "" {
 			toDownload = append(toDownload, m)
@@ -847,10 +1035,16 @@ func handleOpenChat(ctx context.Context, client *whatsmeow.Client, logger waLog.
 		if m.Type == "audio" && m.AudioPath == "" && m.AudioDirectPath != "" {
 			toDownloadAudio = append(toDownloadAudio, m)
 		}
+		if (m.Type == "video" || m.Type == "gif") && m.VideoPath == "" && m.VideoDirectPath != "" {
+			toDownloadVideo = append(toDownloadVideo, m)
+		}
+		if m.Type == "sticker" && m.StickerPath == "" && m.StickerDirectPath != "" {
+			toDownloadSticker = append(toDownloadSticker, m)
+		}
 	}
 	messagesMu.Unlock()
 
-	logger.Debugf("open_chat %s: %d cached messages, %d images to download, %d audio to download", jid, len(list), len(toDownload), len(toDownloadAudio))
+	logger.Debugf("open_chat %s: %d cached messages, %d images to download, %d audio to download, %d video to download, %d stickers to download", jid, len(list), len(toDownload), len(toDownloadAudio), len(toDownloadVideo), len(toDownloadSticker))
 	emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
 
 	go markChatReadAndClearUnread(ctx, client, logger, jid, list, chats)
@@ -860,6 +1054,12 @@ func handleOpenChat(ctx context.Context, client *whatsmeow.Client, logger waLog.
 	}
 	for _, m := range toDownloadAudio {
 		go downloadAudio(ctx, client, logger, messages, jid, m)
+	}
+	for _, m := range toDownloadVideo {
+		go downloadVideo(ctx, client, logger, messages, jid, m)
+	}
+	for _, m := range toDownloadSticker {
+		go downloadSticker(ctx, client, logger, messages, jid, m)
 	}
 }
 
@@ -1281,7 +1481,7 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 		emit(event{Type: "chats", Chats: list})
 	}
 
-	text, msgType, img, audio, ok := extractMessage(evt.Message)
+	text, msgType, img, audio, video, sticker, ok := extractMessage(evt.Message)
 	if !ok {
 		return
 	}
@@ -1297,6 +1497,12 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 	if msgType == "audio" && audio != nil {
 		setAudioFields(&cm, audio)
+	}
+	if (msgType == "video" || msgType == "gif") && video != nil {
+		setVideoFields(&cm, video)
+	}
+	if msgType == "sticker" && sticker != nil {
+		setStickerFields(&cm, sticker)
 	}
 	if evt.Info.IsGroup && !evt.Info.IsFromMe {
 		cm.Sender = evt.Info.Sender.String()
@@ -1318,6 +1524,12 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 	if msgType == "audio" && audio != nil {
 		go downloadAudio(ctx, client, logger, messages, jid.String(), cm)
+	}
+	if (msgType == "video" || msgType == "gif") && video != nil {
+		go downloadVideo(ctx, client, logger, messages, jid.String(), cm)
+	}
+	if msgType == "sticker" && sticker != nil {
+		go downloadSticker(ctx, client, logger, messages, jid.String(), cm)
 	}
 }
 
