@@ -3,6 +3,7 @@ package com.matheusmortatti.lightwhatsapp
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.os.Bundle
 import android.os.SystemClock
@@ -504,6 +505,7 @@ private fun ChatDetailScreen(
                             chatName = chat.name,
                             showHeader = showHeader || showStatus,
                             showStatus = showStatus,
+                            onPlayVideo = { _, _ -> },
                             modifier = Modifier.padding(
                                 start = 24.dp,
                                 end = 24.dp,
@@ -658,6 +660,7 @@ private fun MessageRow(
     chatName: String,
     showHeader: Boolean,
     showStatus: Boolean,
+    onPlayVideo: (path: String, loop: Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val bodyAlign = if (message.fromMe) TextAlign.End else TextAlign.Start
@@ -726,6 +729,42 @@ private fun MessageRow(
                     }
                 } else {
                     MessageBodyText(text = "[Sticker]", lighten = true, align = bodyAlign)
+                }
+            }
+
+            "video", "gif" -> {
+                val path = message.videoPath
+                if (path != null) {
+                    val thumbnail by rememberDecodedVideoThumbnail(path)
+                    Box(
+                        modifier = Modifier
+                            .size(200.dp)
+                            .padding(bottom = 4.dp)
+                            .lightClickable { onPlayVideo(path, message.isGif) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (thumbnail != null) {
+                            Image(
+                                bitmap = thumbnail!!,
+                                contentDescription = if (message.isGif) "GIF" else "Video",
+                                modifier = Modifier.size(200.dp),
+                            )
+                        }
+                        LightIcon(
+                            icon = LightIcons.PLAY,
+                            size = 3f,
+                            contentDescription = "Play",
+                        )
+                    }
+                } else {
+                    MessageBodyText(
+                        text = if (message.isGif) "[GIF]" else "[Video]",
+                        lighten = true,
+                        align = bodyAlign,
+                    )
+                }
+                if (message.text.isNotBlank()) {
+                    MessageBodyText(text = message.text, align = bodyAlign)
                 }
             }
 
@@ -971,6 +1010,28 @@ private fun rememberDecodedImage(relativePath: String): State<ImageBitmap?> {
     return produceState<ImageBitmap?>(initialValue = null, relativePath) {
         value = withContext(Dispatchers.IO) {
             BitmapFactory.decodeFile(File(context.filesDir, relativePath).absolutePath)?.asImageBitmap()
+        }
+    }
+}
+
+// Decodes a video/gif message's first frame off the main thread, the same
+// way rememberDecodedImage does for images — core writes the file relative
+// to context.filesDir (see CoreProcess.kt).
+@Composable
+private fun rememberDecodedVideoThumbnail(relativePath: String): State<ImageBitmap?> {
+    val context = LocalContext.current
+    return produceState<ImageBitmap?>(initialValue = null, relativePath) {
+        value = withContext(Dispatchers.IO) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(File(context.filesDir, relativePath).absolutePath)
+                retriever.frameAtTime?.asImageBitmap()
+            } catch (e: Exception) {
+                Log.w("MainActivity", "failed to decode video thumbnail $relativePath", e)
+                null
+            } finally {
+                retriever.release()
+            }
         }
     }
 }
