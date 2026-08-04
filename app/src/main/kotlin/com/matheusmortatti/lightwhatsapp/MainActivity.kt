@@ -511,7 +511,7 @@ private fun ChatDetailScreen(
             verticalAlignment = Alignment.Bottom,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 12.dp),
+                .padding(horizontal = 24.dp, vertical = 4.dp),
         ) {
             LightTextField(
                 label = "Message",
@@ -524,7 +524,7 @@ private fun ChatDetailScreen(
                 icon = LightIcons.MICROPHONE,
                 contentDescription = "Record a voice message",
                 modifier = Modifier
-                    .padding(start = 16.dp, bottom = 6.dp)
+                    .padding(start = 16.dp, bottom = 2.dp)
                     .lightClickable {
                         val granted = ContextCompat.checkSelfPermission(
                             context,

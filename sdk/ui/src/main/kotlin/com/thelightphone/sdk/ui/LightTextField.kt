@@ -14,7 +14,7 @@ import androidx.compose.ui.tooling.preview.Preview
 private const val UNDERLINE_THICKNESS_PX = 3f
 private const val UNDERLINE_WIDTH_FRACTION = 0.8f
 
-private const val VALUE_TO_UNDERLINE_GAP_GRID_UNITS = 0.5f
+private const val VALUE_TO_UNDERLINE_GAP_GRID_UNITS = 0.25f
 
 /**
  * Read-only field used in conjunction with LightTextInputEditor to show a value that can be edited by tapping and opening the editor
@@ -33,14 +33,14 @@ fun LightTextField(
         LightText(
             text = label,
             variant = LightTextVariant.Detail,
-            modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
+            modifier = Modifier.padding(top = 0.5f.gridUnitsAsDp()),
         )
         val isPlaceholder = value.isBlank()
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .lightClickable(onClick = onClick)
-                .padding(top = 0.25f.gridUnitsAsDp()),
+                .padding(top = 0.15f.gridUnitsAsDp()),
         ) {
             LightText(
                 text = if (isPlaceholder) placeholder else value,
