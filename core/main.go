@@ -804,8 +804,12 @@ func handleSentMessageStatusReceipt(ctx context.Context, client *whatsmeow.Clien
 	messagesMu.Lock()
 	list, ok := messages[jidStr]
 	if !ok {
-		messagesMu.Unlock()
-		return
+		list = loadCachedMessages(jidStr)
+		if len(list) == 0 {
+			messagesMu.Unlock()
+			return
+		}
+		messages[jidStr] = list
 	}
 	changed := applyMessageStatus(list, evt.MessageIDs, status)
 	if changed {

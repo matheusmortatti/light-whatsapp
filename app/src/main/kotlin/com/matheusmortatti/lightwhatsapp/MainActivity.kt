@@ -468,7 +468,7 @@ private fun ChatDetailScreen(
             // would still get its header forced visible below, for a
             // status suffix that never renders.
             val lastOwnMessageId = remember(messages, chat.isGroup) {
-                if (chat.isGroup) null else messages.lastOrNull { it.fromMe }?.id
+                if (chat.isGroup) null else messages.lastOrNull { it.fromMe && it.status != null }?.id
             }
             LightLazyScrollView(
                 modifier = Modifier
