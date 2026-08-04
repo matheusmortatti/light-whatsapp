@@ -20,9 +20,9 @@ data class Chat(
     val isGroup: Boolean,
 )
 
-// Only "text", "image", and "audio" ever show up here (see core/main.go's
-// extractMessage) — every other WhatsApp message type is dropped before it
-// reaches the app.
+// "text", "image", "audio", "video", "gif", and "sticker" show up here (see
+// core/main.go's extractMessage) — every other WhatsApp message type is
+// dropped before it reaches the app.
 data class Message(
     val id: String,
     val timestamp: Long,
@@ -42,6 +42,17 @@ data class Message(
     // still downloading.
     val audioPath: String?,
     val audioSeconds: Int,
+    // Same deal again, but for video/gif messages ("gif" is WhatsApp's
+    // GifPlayback-flagged video encoding — see core/main.go's
+    // extractMessage). isGif mirrors type == "gif", provided directly so
+    // rendering code doesn't need to re-derive it from a string.
+    val videoPath: String?,
+    val videoSeconds: Int,
+    val isGif: Boolean,
+    // Same deal again, but for sticker messages. Lottie (vector) stickers
+    // never reach here — core/main.go treats them as unsupported.
+    val stickerPath: String?,
+    val stickerIsAnimated: Boolean,
 )
 
 sealed class CoreEvent {
@@ -210,6 +221,11 @@ class CoreProcess(private val context: Context) {
                 imagePath = o.optString("image_path").ifBlank { null },
                 audioPath = o.optString("audio_path").ifBlank { null },
                 audioSeconds = o.optInt("audio_seconds", 0),
+                videoPath = o.optString("video_path").ifBlank { null },
+                videoSeconds = o.optInt("video_seconds", 0),
+                isGif = o.optBoolean("is_gif", false),
+                stickerPath = o.optString("sticker_path").ifBlank { null },
+                stickerIsAnimated = o.optBoolean("sticker_is_animated", false),
             )
         }
     }
