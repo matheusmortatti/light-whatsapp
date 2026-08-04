@@ -986,10 +986,15 @@ func handleSendAudio(ctx context.Context, client *whatsmeow.Client, logger waLog
 		path = finalPath
 	}
 
+	status := "sent"
+	if c.IsGroup {
+		status = ""
+	}
 	cm := chatMessage{
 		ID:           resp.ID,
 		Timestamp:    timestamp,
 		FromMe:       true,
+		Status:       status,
 		Type:         "audio",
 		AudioPath:    path,
 		AudioSeconds: seconds,
