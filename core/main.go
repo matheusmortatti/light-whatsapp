@@ -450,18 +450,67 @@ func resolveMentions(ctx context.Context, client *whatsmeow.Client, text string)
 		return text
 	}
 	return mentionPattern.ReplaceAllStringFunc(text, func(match string) string {
-		user := match[1:]
-		if name := contactName(ctx, client, types.NewJID(user, types.HiddenUserServer)); name != "" {
+		if name := cachedMentionName(ctx, client, match[1:]); name != "" {
 			return "@" + name
-		}
-		if name := contactName(ctx, client, types.NewJID(user, types.DefaultUserServer)); name != "" {
-			return "@" + name
-		}
-		if client.Store.PushName != "" && ((client.Store.ID != nil && user == client.Store.ID.User) || user == client.Store.GetLID().User) {
-			return "@" + client.Store.PushName
 		}
 		return match
 	})
+}
+
+// mentionNameMu guards mentionNameCache.
+var mentionNameMu sync.Mutex
+
+// mentionNameCache memoizes lookupMentionName by the mentioned user's bare
+// JID part, since resolveMentionsInList re-resolves every message's mentions
+// on every emit (see its own comment) and each miss costs up to two SQLite
+// round-trips. Only successful lookups are cached — a "" result is left
+// unmemoized so a contact that resolves later (address-book sync, a Contact/
+// PushName event) is picked up on the next mention rather than staying
+// stuck at the raw number. Entries are dropped by invalidateMentionName when
+// a Contact/PushName event says a name changed.
+var mentionNameCache = make(map[string]string)
+
+func cachedMentionName(ctx context.Context, client *whatsmeow.Client, user string) string {
+	mentionNameMu.Lock()
+	name, ok := mentionNameCache[user]
+	mentionNameMu.Unlock()
+	if ok {
+		return name
+	}
+
+	name = lookupMentionName(ctx, client, user)
+	if name == "" {
+		return ""
+	}
+
+	mentionNameMu.Lock()
+	mentionNameCache[user] = name
+	mentionNameMu.Unlock()
+	return name
+}
+
+// invalidateMentionName drops user's cached mention name so the next mention
+// of them re-resolves against the contact store, rather than keeping a
+// stale name after a Contact/PushName event.
+func invalidateMentionName(user string) {
+	mentionNameMu.Lock()
+	delete(mentionNameCache, user)
+	mentionNameMu.Unlock()
+}
+
+// lookupMentionName is resolveMentions' uncached lookup — see its comment
+// for why LID is tried first, then phone number, then self push name.
+func lookupMentionName(ctx context.Context, client *whatsmeow.Client, user string) string {
+	if name := contactName(ctx, client, types.NewJID(user, types.HiddenUserServer)); name != "" {
+		return name
+	}
+	if name := contactName(ctx, client, types.NewJID(user, types.DefaultUserServer)); name != "" {
+		return name
+	}
+	if client.Store.PushName != "" && ((client.Store.ID != nil && user == client.Store.ID.User) || user == client.Store.GetLID().User) {
+		return client.Store.PushName
+	}
+	return ""
 }
 
 // resolveMentionsInList returns a copy of list with each message's mentions
@@ -1802,8 +1851,10 @@ func main() {
 			handleSentMessageStatusReceipt(ctx, client, e, messages)
 		case *events.Contact:
 			refreshContactName(ctx, client, e.JID, chats)
+			invalidateMentionName(e.JID.User)
 		case *events.PushName:
 			refreshContactName(ctx, client, e.JID, chats)
+			invalidateMentionName(e.JID.User)
 		}
 	})
 	go readCommands(ctx, client, logger, chats, messages)
