@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -285,9 +286,12 @@ func upsertMessage(messages map[string][]chatMessage, jid string, msg chatMessag
 
 // extractMessage pulls the text (or image) content out of a WhatsApp
 // message, unwrapping the ephemeral/view-once wrappers disappearing
-// messages arrive in. Anything else (video, audio, documents, stickers,
-// polls, reactions, location, ...) comes back ok=false — the app only shows
-// text and images.
+// messages arrive in. Anything else (video, documents, stickers, polls,
+// reactions, location, ...) the app doesn't render comes back as msgType
+// "unsupported" with a human-readable label in text (see
+// unsupportedMessageLabel) rather than being dropped — the app shows it as
+// "Unsupported message: <label>" so at least its arrival is visible, even
+// though its content isn't.
 func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, audio *waE2E.AudioMessage, ok bool) {
 	for i := 0; i < 4 && m != nil; i++ {
 		switch {
@@ -307,10 +311,62 @@ func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMes
 		case m.GetViewOnceMessageV2() != nil:
 			m = m.GetViewOnceMessageV2().GetMessage()
 		default:
-			return "", "", nil, nil, false
+			return unsupportedMessageLabel(m), "unsupported", nil, nil, true
 		}
 	}
 	return "", "", nil, nil, false
+}
+
+// unsupportedMessageLabel names whichever content field is populated on m,
+// for display when none of extractMessage's known cases match. waE2E.Message
+// has ~100 possible content fields (video, document, sticker, poll,
+// location, reaction, ...) covering every WhatsApp message type; walking
+// them via reflection here means new message types WhatsApp adds show up
+// with a sensible label automatically, instead of this needing a matching
+// hardcoded case added by hand.
+func unsupportedMessageLabel(m *waE2E.Message) string {
+	if m == nil {
+		return "message"
+	}
+	// WhatsApp sends GIFs as a VideoMessage with GifPlayback set — there's no
+	// separate "gif" content field to catch via the generic field walk below.
+	if vm := m.GetVideoMessage(); vm != nil && vm.GetGifPlayback() {
+		return "gif"
+	}
+	v := reflect.ValueOf(m).Elem()
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		switch field.Name {
+		case "MessageContextInfo", "SenderKeyDistributionMessage", "FastRatchetKeySenderKeyDistributionMessage":
+			continue
+		}
+		fv := v.Field(i)
+		if fv.Kind() != reflect.Pointer || fv.IsNil() {
+			continue
+		}
+		return humanizeFieldName(strings.TrimSuffix(field.Name, "Message"))
+	}
+	return "message"
+}
+
+// humanizeFieldName turns a Go struct field name like "GroupInvite" or
+// "PollCreationV3" into "group invite"/"poll creation v3" for display.
+func humanizeFieldName(name string) string {
+	if name == "" {
+		return "message"
+	}
+	var b strings.Builder
+	for i, r := range name {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			b.WriteByte(' ')
+		}
+		b.WriteRune(r)
+	}
+	return strings.ToLower(b.String())
 }
 
 // mentionPattern matches WhatsApp's raw @-mention syntax embedded directly in

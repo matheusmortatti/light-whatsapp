@@ -643,6 +643,12 @@ private fun MessageRow(
                 }
             }
 
+            "unsupported" -> MessageBodyText(
+                text = "[Unsupported message: ${message.text}]",
+                lighten = true,
+                align = bodyAlign,
+            )
+
             else -> MessageBodyText(text = message.text, align = bodyAlign)
         }
     }
