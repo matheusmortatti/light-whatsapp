@@ -62,6 +62,10 @@ sealed class CoreEvent {
     data class Error(val message: String) : CoreEvent()
     data class Chats(val chats: List<Chat>) : CoreEvent()
     data class Messages(val jid: String, val messages: List<Message>) : CoreEvent()
+    // Incremental counterpart to Messages: one or a few messages that changed
+    // (a download completing, a status receipt, a new send/receive) rather
+    // than the chat's whole list — see core/main.go's "message_update" event.
+    data class MessageUpdate(val jid: String, val messages: List<Message>) : CoreEvent()
 }
 
 /**
@@ -185,6 +189,7 @@ class CoreProcess(private val context: Context) {
             "error" -> CoreEvent.Error(obj.optString("message"))
             "chats" -> CoreEvent.Chats(parseChats(obj.optJSONArray("chats")))
             "messages" -> CoreEvent.Messages(obj.getString("jid"), parseMessages(obj.optJSONArray("messages")))
+            "message_update" -> CoreEvent.MessageUpdate(obj.getString("jid"), parseMessages(obj.optJSONArray("messages")))
             else -> null
         }
     } catch (e: Exception) {

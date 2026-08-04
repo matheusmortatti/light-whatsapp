@@ -63,9 +63,14 @@ func init() {
 // event is one line of the stdout protocol. Exactly one of the fields
 // relevant to Type is populated.
 type event struct {
-	Type     string        `json:"type"` // "qr" | "connected" | "logged_out" | "error" | "chats" | "messages"
-	Code     string        `json:"code,omitempty"`
-	JID      string        `json:"jid,omitempty"`
+	Type string `json:"type"` // "qr" | "connected" | "logged_out" | "error" | "chats" | "messages" | "message_update"
+	Code string `json:"code,omitempty"`
+	JID  string `json:"jid,omitempty"`
+	// "messages" carries the chat's full list (open_chat replies only).
+	// "message_update" carries just the messages that changed — one for a
+	// download completion or a newly sent/received message, possibly several
+	// for a status receipt covering multiple message IDs — for the app to
+	// upsert into its already-held list instead of replacing it wholesale.
 	Message  string        `json:"message,omitempty"`
 	Chats    []chatSummary `json:"chats,omitempty"`
 	Messages []chatMessage `json:"messages,omitempty"`
@@ -619,8 +624,8 @@ func imagePath(jid, msgID, mimetype string) string {
 // download reference set by setImageFields, not the original *waE2E.
 // ImageMessage — that doesn't survive a process restart, this does), writes
 // it to disk, and updates the stored chatMessage with the resulting path,
-// clearing the now-unneeded key material and re-emitting the chat's message
-// list so the app can render it once it lands. Meant to run in its own
+// clearing the now-unneeded key material and emitting a message_update for
+// it so the app can render it once it lands. Meant to run in its own
 // goroutine — image messages show up caption/placeholder-only until this
 // completes.
 func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage, jid string, m chatMessage) {
@@ -641,6 +646,8 @@ func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 
 	messagesMu.Lock()
 	list, ok := messages[jid]
+	var updated chatMessage
+	found := false
 	if ok {
 		for i, cur := range list {
 			if cur.ID == m.ID {
@@ -650,6 +657,8 @@ func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 				list[i].ImageFileSHA256 = nil
 				list[i].ImageFileEncSHA256 = nil
 				list[i].ImageMimetype = ""
+				updated = list[i]
+				found = true
 				break
 			}
 		}
@@ -658,8 +667,8 @@ func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 	messagesMu.Unlock()
 
-	if ok {
-		emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
+	if found {
+		emit(event{Type: "message_update", JID: jid, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
 	}
 }
 
@@ -688,7 +697,7 @@ func audioPath(jid, msgID, mimetype string) string {
 // downloadAudio is downloadImage's counterpart for audio messages: fetches
 // the media (using the persisted download reference set by setAudioFields),
 // writes it to disk, and updates the stored chatMessage with the resulting
-// path, re-emitting the chat's message list so the app can render a player
+// path, emitting a message_update for it so the app can render a player
 // once it lands. Meant to run in its own goroutine.
 func downloadAudio(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage, jid string, m chatMessage) {
 	data, err := client.DownloadMediaWithPath(ctx, m.AudioDirectPath, m.AudioFileEncSHA256, m.AudioFileSHA256, m.AudioMediaKey, whatsmeow.MediaAudio, "", false)
@@ -708,6 +717,8 @@ func downloadAudio(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 
 	messagesMu.Lock()
 	list, ok := messages[jid]
+	var updated chatMessage
+	found := false
 	if ok {
 		for i, cur := range list {
 			if cur.ID == m.ID {
@@ -717,6 +728,8 @@ func downloadAudio(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 				list[i].AudioFileSHA256 = nil
 				list[i].AudioFileEncSHA256 = nil
 				list[i].AudioMimetype = ""
+				updated = list[i]
+				found = true
 				break
 			}
 		}
@@ -725,8 +738,8 @@ func downloadAudio(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 	messagesMu.Unlock()
 
-	if ok {
-		emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
+	if found {
+		emit(event{Type: "message_update", JID: jid, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
 	}
 }
 
@@ -749,7 +762,7 @@ func videoPath(jid, msgID, mimetype string) string {
 // downloadVideo is downloadImage's counterpart for video/GIF messages:
 // fetches the media (using the persisted download reference set by
 // setVideoFields), writes it to disk, and updates the stored chatMessage
-// with the resulting path, re-emitting the chat's message list so the app
+// with the resulting path, emitting a message_update for it so the app
 // can render a thumbnail/player once it lands. Meant to run in its own
 // goroutine.
 //
@@ -790,6 +803,8 @@ func downloadVideo(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 
 	messagesMu.Lock()
 	list, ok := messages[jid]
+	var updated chatMessage
+	found := false
 	if ok {
 		for i, cur := range list {
 			if cur.ID == m.ID {
@@ -799,6 +814,8 @@ func downloadVideo(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 				list[i].VideoFileSHA256 = nil
 				list[i].VideoFileEncSHA256 = nil
 				list[i].VideoMimetype = ""
+				updated = list[i]
+				found = true
 				break
 			}
 		}
@@ -807,8 +824,8 @@ func downloadVideo(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 	messagesMu.Unlock()
 
-	if ok {
-		emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
+	if found {
+		emit(event{Type: "message_update", JID: jid, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
 	}
 }
 
@@ -849,6 +866,8 @@ func downloadSticker(ctx context.Context, client *whatsmeow.Client, logger waLog
 
 	messagesMu.Lock()
 	list, ok := messages[jid]
+	var updated chatMessage
+	found := false
 	if ok {
 		for i, cur := range list {
 			if cur.ID == m.ID {
@@ -858,6 +877,8 @@ func downloadSticker(ctx context.Context, client *whatsmeow.Client, logger waLog
 				list[i].StickerFileSHA256 = nil
 				list[i].StickerFileEncSHA256 = nil
 				list[i].StickerMimetype = ""
+				updated = list[i]
+				found = true
 				break
 			}
 		}
@@ -866,8 +887,8 @@ func downloadSticker(ctx context.Context, client *whatsmeow.Client, logger waLog
 	}
 	messagesMu.Unlock()
 
-	if ok {
-		emit(event{Type: "messages", JID: jid, Messages: resolveMentionsInList(ctx, client, list)})
+	if found {
+		emit(event{Type: "message_update", JID: jid, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
 	}
 }
 
@@ -1013,28 +1034,28 @@ func receiptStatusFor(evt *events.Receipt) string {
 // applyMessageStatus sets Status to status, in place, on every message in
 // list whose ID is in ids and is FromMe — except it never downgrades an
 // existing "read" back to "delivered" (a delivered receipt can in
-// principle arrive after a read one, out of order). Returns whether
-// anything changed.
-func applyMessageStatus(list []chatMessage, ids []types.MessageID, status string) bool {
+// principle arrive after a read one, out of order). Returns the messages it
+// changed, for the caller to emit as an incremental update.
+func applyMessageStatus(list []chatMessage, ids []types.MessageID, status string) []chatMessage {
 	idSet := make(map[types.MessageID]bool, len(ids))
 	for _, id := range ids {
 		idSet[id] = true
 	}
-	changed := false
+	var changed []chatMessage
 	for i, m := range list {
 		if !m.FromMe || !idSet[m.ID] || m.Status == "read" {
 			continue
 		}
 		list[i].Status = status
-		changed = true
+		changed = append(changed, list[i])
 	}
 	return changed
 }
 
 // handleSentMessageStatusReceipt reacts to a *events.Receipt telling us the
 // actual recipient (not our own read-sync — see handleReadReceipt) received
-// or read a message we sent, updating that message's Status and re-emitting
-// the chat's messages so the UI updates live.
+// or read a message we sent, updating that message's Status and emitting a
+// message_update so the UI updates live.
 func handleSentMessageStatusReceipt(ctx context.Context, client *whatsmeow.Client, evt *events.Receipt, messages map[string][]chatMessage) {
 	status := receiptStatusFor(evt)
 	if status == "" {
@@ -1053,13 +1074,13 @@ func handleSentMessageStatusReceipt(ctx context.Context, client *whatsmeow.Clien
 		messages[jidStr] = list
 	}
 	changed := applyMessageStatus(list, evt.MessageIDs, status)
-	if changed {
+	if len(changed) > 0 {
 		saveMessages(jidStr, list)
 	}
 	messagesMu.Unlock()
 
-	if changed {
-		emit(event{Type: "messages", JID: jidStr, Messages: resolveMentionsInList(ctx, client, list)})
+	if len(changed) > 0 {
+		emit(event{Type: "message_update", JID: jidStr, Messages: resolveMentionsInList(ctx, client, changed)})
 	}
 }
 
@@ -1163,10 +1184,10 @@ func handleSendMessage(ctx context.Context, client *whatsmeow.Client, logger waL
 	}
 
 	messagesMu.Lock()
-	msgList := upsertMessage(messages, jidStr, cm)
+	upsertMessage(messages, jidStr, cm)
 	messagesMu.Unlock()
 
-	emit(event{Type: "messages", JID: jidStr, Messages: resolveMentionsInList(ctx, client, msgList)})
+	emit(event{Type: "message_update", JID: jidStr, Messages: resolveMentionsInList(ctx, client, []chatMessage{cm})})
 }
 
 // recordedAudioMimetype is what this app's own recordings are encoded as
@@ -1260,10 +1281,10 @@ func handleSendAudio(ctx context.Context, client *whatsmeow.Client, logger waLog
 	}
 
 	messagesMu.Lock()
-	msgList := upsertMessage(messages, jidStr, cm)
+	upsertMessage(messages, jidStr, cm)
 	messagesMu.Unlock()
 
-	emit(event{Type: "messages", JID: jidStr, Messages: resolveMentionsInList(ctx, client, msgList)})
+	emit(event{Type: "message_update", JID: jidStr, Messages: resolveMentionsInList(ctx, client, []chatMessage{cm})})
 }
 
 // readCommands is the stdin half of the protocol: one JSON command per
@@ -1576,10 +1597,10 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 
 	messagesMu.Lock()
-	msgList := upsertMessage(messages, jid.String(), cm)
+	upsertMessage(messages, jid.String(), cm)
 	messagesMu.Unlock()
 
-	emit(event{Type: "messages", JID: jid.String(), Messages: resolveMentionsInList(ctx, client, msgList)})
+	emit(event{Type: "message_update", JID: jid.String(), Messages: resolveMentionsInList(ctx, client, []chatMessage{cm})})
 
 	if !evt.Info.IsFromMe && isOpen {
 		go markChatRead(ctx, client, logger, jid, []chatMessage{cm})

@@ -44,8 +44,8 @@ func TestApplyMessageStatus(t *testing.T) {
 			{ID: "m2", FromMe: false},
 		}
 		changed := applyMessageStatus(list, []types.MessageID{"m1"}, "delivered")
-		if !changed {
-			t.Fatal("expected changed = true")
+		if len(changed) != 1 || changed[0].ID != "m1" {
+			t.Fatalf("expected changed = [m1], got %v", changed)
 		}
 		if list[0].Status != "delivered" {
 			t.Errorf("list[0].Status = %q, want %q", list[0].Status, "delivered")
@@ -58,8 +58,8 @@ func TestApplyMessageStatus(t *testing.T) {
 	t.Run("never downgrades read back to delivered", func(t *testing.T) {
 		list := []chatMessage{{ID: "m1", FromMe: true, Status: "read"}}
 		changed := applyMessageStatus(list, []types.MessageID{"m1"}, "delivered")
-		if changed {
-			t.Fatal("expected changed = false, read must not downgrade")
+		if len(changed) != 0 {
+			t.Fatalf("expected no changes, read must not downgrade, got %v", changed)
 		}
 		if list[0].Status != "read" {
 			t.Errorf("list[0].Status = %q, want %q", list[0].Status, "read")
@@ -69,8 +69,8 @@ func TestApplyMessageStatus(t *testing.T) {
 	t.Run("message ID not found is a no-op", func(t *testing.T) {
 		list := []chatMessage{{ID: "m1", FromMe: true, Status: "sent"}}
 		changed := applyMessageStatus(list, []types.MessageID{"missing"}, "delivered")
-		if changed {
-			t.Fatal("expected changed = false")
+		if len(changed) != 0 {
+			t.Fatalf("expected no changes, got %v", changed)
 		}
 		if list[0].Status != "sent" {
 			t.Errorf("list[0].Status = %q, want unchanged %q", list[0].Status, "sent")
@@ -80,8 +80,8 @@ func TestApplyMessageStatus(t *testing.T) {
 	t.Run("ignores non-from-me messages even if ID matches", func(t *testing.T) {
 		list := []chatMessage{{ID: "m1", FromMe: false, Status: ""}}
 		changed := applyMessageStatus(list, []types.MessageID{"m1"}, "delivered")
-		if changed {
-			t.Fatal("expected changed = false")
+		if len(changed) != 0 {
+			t.Fatalf("expected no changes, got %v", changed)
 		}
 		if list[0].Status != "" {
 			t.Errorf("list[0].Status should stay empty, got %q", list[0].Status)

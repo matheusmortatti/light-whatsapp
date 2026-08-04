@@ -68,6 +68,11 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
                             _messages.value = event.messages
                         }
                     }
+                    is CoreEvent.MessageUpdate -> {
+                        if (event.jid == _selectedChat.value?.jid) {
+                            _messages.value = mergeMessages(_messages.value, event.messages)
+                        }
+                    }
                 }
             }
         }
@@ -101,6 +106,21 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
     fun sendAudio(audioPath: String, durationMs: Long) {
         val jid = _selectedChat.value?.jid ?: return
         coreProcess.sendAudio(jid, audioPath, durationMs)
+    }
+
+    // Applies a message_update's delta onto the currently held list: existing
+    // IDs are replaced in place (so Compose's key-based diffing only
+    // invalidates that one row), unknown IDs are new messages and get
+    // appended, re-sorting only if that happened — updates alone (the common
+    // case: a download completing, a status receipt) never need a re-sort
+    // since they don't change any message's position.
+    private fun mergeMessages(current: List<Message>, updates: List<Message>): List<Message> {
+        val byId = current.associateByTo(LinkedHashMap()) { it.id }
+        var appended = false
+        for (update in updates) {
+            if (byId.put(update.id, update) == null) appended = true
+        }
+        return if (appended) byId.values.sortedBy { it.timestamp } else byId.values.toList()
     }
 
     private fun encodeQr(text: String, size: Int = 512): ImageBitmap {
