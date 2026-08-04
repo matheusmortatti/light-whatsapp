@@ -1526,10 +1526,11 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 		c.UnreadCount++
 	}
 	changed := bumped || unread || !ok
+	var list []chatSummary
 	if changed {
 		chats[jid.String()] = c
+		list = saveChats(chats)
 	}
-	list := saveChats(chats)
 	chatsMu.Unlock()
 
 	if changed {
