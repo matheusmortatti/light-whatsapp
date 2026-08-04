@@ -2,12 +2,14 @@ package com.matheusmortatti.lightwhatsapp
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
+import android.util.LruCache
 import android.widget.VideoView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -47,10 +49,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.viewinterop.AndroidView
@@ -767,7 +771,7 @@ private fun MessageRow(
             "image" -> {
                 val path = message.imagePath
                 if (path != null) {
-                    val bitmap by rememberDecodedImage(path)
+                    val bitmap by rememberDecodedImage(path, targetSize = 200.dp, allowAlpha = false)
                     if (bitmap != null) {
                         Image(
                             bitmap = bitmap!!,
@@ -790,7 +794,7 @@ private fun MessageRow(
             "sticker" -> {
                 val path = message.stickerPath
                 if (path != null) {
-                    val bitmap by rememberDecodedImage(path)
+                    val bitmap by rememberDecodedImage(path, targetSize = STICKER_SIZE_DP)
                     if (bitmap != null) {
                         Image(
                             bitmap = bitmap!!,
@@ -1076,15 +1080,56 @@ private fun formatDuration(totalSeconds: Long): String {
     return "%d:%02d".format(minutes, seconds)
 }
 
+// Shared across every image/sticker row so scrolling a photo off-screen and
+// back doesn't re-decode it from disk. Sized against heap budget rather than
+// a fixed entry count since decoded size varies a lot between a downsampled
+// sticker and a downsampled photo.
+private val decodedImageCache = object : LruCache<String, ImageBitmap>(
+    (Runtime.getRuntime().maxMemory() / 8).toInt()
+) {
+    override fun sizeOf(key: String, value: ImageBitmap): Int = value.width * value.height * 4
+}
+
+// Two-pass decode: read bounds first, then decode straight to the sample
+// size the target display box needs, so a 12MP photo never gets fully
+// decoded just to be drawn into a 200dp box.
+private fun decodeSampledBitmap(file: File, reqWidthPx: Int, reqHeightPx: Int, allowAlpha: Boolean): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.absolutePath, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+    var sampleSize = 1
+    var halfWidth = bounds.outWidth / 2
+    var halfHeight = bounds.outHeight / 2
+    while (halfWidth / sampleSize >= reqWidthPx && halfHeight / sampleSize >= reqHeightPx) {
+        sampleSize *= 2
+    }
+
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sampleSize
+        inPreferredConfig = if (allowAlpha) Bitmap.Config.ARGB_8888 else Bitmap.Config.RGB_565
+    }
+    return BitmapFactory.decodeFile(file.absolutePath, options)
+}
+
 // Decodes an image message's file off the main thread — core writes it
 // relative to context.filesDir, the subprocess's working dir (see
-// CoreProcess.kt).
+// CoreProcess.kt). Downsamples to targetSize and caches the result in
+// decodedImageCache, keyed on path+size so the same file at a different
+// display size (shouldn't happen today, but stays correct if it does)
+// doesn't collide.
 @Composable
-private fun rememberDecodedImage(relativePath: String): State<ImageBitmap?> {
+private fun rememberDecodedImage(relativePath: String, targetSize: Dp, allowAlpha: Boolean = true): State<ImageBitmap?> {
     val context = LocalContext.current
-    return produceState<ImageBitmap?>(initialValue = null, relativePath) {
-        value = withContext(Dispatchers.IO) {
-            BitmapFactory.decodeFile(File(context.filesDir, relativePath).absolutePath)?.asImageBitmap()
+    val targetPx = with(LocalDensity.current) { targetSize.roundToPx() }
+    val cacheKey = "$relativePath@$targetPx"
+    return produceState<ImageBitmap?>(initialValue = decodedImageCache.get(cacheKey), cacheKey) {
+        if (value == null) {
+            value = withContext(Dispatchers.IO) {
+                decodeSampledBitmap(File(context.filesDir, relativePath), targetPx, targetPx, allowAlpha)
+                    ?.asImageBitmap()
+                    ?.also { decodedImageCache.put(cacheKey, it) }
+            }
         }
     }
 }
