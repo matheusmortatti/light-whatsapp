@@ -14,7 +14,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.zIndex
 
-private const val TOPBAR_HEIGHT_UNITS = 3f
+private const val TOPBAR_HEIGHT_UNITS = 2.1f
 private const val HORIZONTAL_PADDING_UNITS = 1f
 private const val CENTER_MAX_WIDTH_UNITS = 18f
 
