@@ -313,12 +313,30 @@ new, ours, not part of upstream.
     tap-to-play full-screen player (`VideoView`, no new dependency) for
     video/GIF, and renders stickers through the existing image-decode path
     (animated WebP shows its first frame only, not animated — accepted
-    limitation, not a bug). Confirmed on-device: a real pre-existing video
-    message rendered a thumbnail and played correctly; a live GIF sent from
+    limitation, not a bug). Confirmed on-device: a video message already
+    present in the chat when the app (running this build) was opened
+    rendered a thumbnail and played correctly — this shows the extraction/
+    thumbnail/playback path works, but doesn't by itself prove the
+    in-place-upgrade path specifically (see the cache-upgrade gap noted
+    below; it's unconfirmed whether that message had been cached by an
+    older build or was freshly extracted by this one). A live GIF sent from
     another WhatsApp client rendered and looped correctly; a live sticker
     rendered correctly; all three survived a force-stop/relaunch without
     getting stranded as an undownloaded placeholder (the same class of bug
-    the image pipeline hit early on — re-checked deliberately here). Audio
-    and documents remain the only dropped-at-extraction media types now.
+    the image pipeline hit early on — re-checked deliberately here).
+    Documents — and everything else (polls, locations, contacts, Lottie
+    stickers) — remain unsupported at extraction; audio is already fully
+    supported (has been since an earlier feature: `extractMessage` has an
+    `"audio"` case, `downloadAudio` exists, `AudioMessageRow` renders it).
     Sending any media type (video/GIF/sticker/image alike) remains out of
     scope for this pass — the app has always been receive-only for media.
+    Known gap: a video/GIF/sticker message that was already cached (e.g.
+    from a history sync under an older build without this feature) stays
+    `[Unsupported message: ...]` permanently — `loadCachedMessages` in
+    `core/main.go` never re-runs `extractMessage` on already-cached rows in
+    `messages/<jid>.json`, so upgrading to this build does not retroactively
+    re-extract old entries. Only newly-arriving messages, or chats not yet
+    in the cache, get the new rendering. A full fix would need a
+    cache-format version marker that forces a re-sync; not implemented in
+    this pass, given WhatsApp's history sync is itself one-time (see the
+    "Chat list caveat" note earlier in this doc).

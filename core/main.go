@@ -172,6 +172,14 @@ var emitMu sync.Mutex
 // goroutine dispatches *events.Connected — both mutate the same map.
 var chatsMu sync.Mutex
 
+// videoDownloadSem caps how many videos downloadVideo fetches concurrently.
+// handleOpenChat dispatches one goroutine per undownloaded video with no
+// limit of its own, and videos (unlike images/audio/stickers) can run tens
+// of MB each — on core's own hardware (the Light Phone III itself),
+// unbounded concurrent multi-MB downloads risk an OOM. Acquired/released
+// inside downloadVideo itself so the cap is self-contained there.
+var videoDownloadSem = make(chan struct{}, 2)
+
 // openChatJID is the chat the app currently has on screen, set by
 // handleOpenChat and cleared by a "close_chat" command (see readCommands).
 // handleMessage consults it so a live message for the chat the user is
@@ -734,19 +742,39 @@ func videoPath(jid, msgID, mimetype string) string {
 // with the resulting path, re-emitting the chat's message list so the app
 // can render a thumbnail/player once it lands. Meant to run in its own
 // goroutine.
+//
+// Unlike downloadImage/downloadAudio/downloadSticker, this streams straight
+// to disk via DownloadMediaWithPathToFile instead of buffering the whole
+// file in memory first — videos can be tens of MB (vs. the ~100KB-1MB
+// images/audio/stickers see), and core runs on the Light Phone III itself,
+// so a pile of simultaneous multi-MB in-memory buffers is a real OOM risk.
+// videoDownloadSem also caps how many of these run at once, since
+// handleOpenChat can dispatch one goroutine per undownloaded video in a
+// chat with no limit of its own.
 func downloadVideo(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage, jid string, m chatMessage) {
-	data, err := client.DownloadMediaWithPath(ctx, m.VideoDirectPath, m.VideoFileEncSHA256, m.VideoFileSHA256, m.VideoMediaKey, whatsmeow.MediaVideo, "", false)
-	if err != nil {
-		logger.Warnf("failed to download video %s/%s: %v", jid, m.ID, err)
-		return
-	}
+	videoDownloadSem <- struct{}{}
+	defer func() { <-videoDownloadSem }()
+
 	path := videoPath(jid, m.ID, m.VideoMimetype)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		logger.Warnf("failed to create media dir for %s: %v", jid, err)
 		return
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		logger.Warnf("failed to write video %s/%s: %v", jid, m.ID, err)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		logger.Warnf("failed to create video file %s/%s: %v", jid, m.ID, err)
+		return
+	}
+	err = client.DownloadMediaWithPathToFile(ctx, m.VideoDirectPath, m.VideoFileEncSHA256, m.VideoFileSHA256, m.VideoMediaKey, whatsmeow.MediaVideo, "", false, f)
+	closeErr := f.Close()
+	if err != nil {
+		logger.Warnf("failed to download video %s/%s: %v", jid, m.ID, err)
+		_ = os.Remove(path)
+		return
+	}
+	if closeErr != nil {
+		logger.Warnf("failed to close video file %s/%s: %v", jid, m.ID, closeErr)
+		_ = os.Remove(path)
 		return
 	}
 

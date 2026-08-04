@@ -680,6 +680,7 @@ private fun VideoPlayerScreen(
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
+    var playbackError by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -695,22 +696,34 @@ private fun VideoPlayerScreen(
                 .fillMaxWidth(),
             contentAlignment = Alignment.Center,
         ) {
-            AndroidView(
-                factory = { ctx ->
-                    VideoView(ctx).apply {
-                        setVideoPath(File(context.filesDir, relativePath).absolutePath)
-                        setOnPreparedListener { mp ->
-                            mp.isLooping = loop
-                            start()
+            if (playbackError) {
+                LightText(
+                    text = "Couldn't play this video",
+                    variant = LightTextVariant.Copy,
+                    lighten = true,
+                )
+            } else {
+                AndroidView(
+                    factory = { ctx ->
+                        VideoView(ctx).apply {
+                            setVideoPath(File(context.filesDir, relativePath).absolutePath)
+                            setOnPreparedListener { mp ->
+                                mp.isLooping = loop
+                                start()
+                            }
+                            setOnErrorListener { _, what, extra ->
+                                Log.w("MainActivity", "video playback error: what=$what extra=$extra for $relativePath")
+                                playbackError = true
+                                // Suppress VideoView's own AOSP error dialog — it would
+                                // look foreign against LightOS's design language; the
+                                // LightText above is the actual user-facing feedback.
+                                true
+                            }
                         }
-                        setOnErrorListener { _, what, extra ->
-                            Log.w("MainActivity", "video playback error: what=$what extra=$extra for $relativePath")
-                            true
-                        }
-                    }
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
     }
 }
