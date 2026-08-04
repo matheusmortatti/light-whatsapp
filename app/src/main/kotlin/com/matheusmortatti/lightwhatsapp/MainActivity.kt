@@ -549,6 +549,9 @@ private fun ChatDetailScreen(
     }
 }
 
+// Stickers are always small/square — a fixed size well under images' 200dp.
+private val STICKER_SIZE_DP = 120.dp
+
 private const val RECORDING_TIMER_TICK_MS = 200L
 
 // Consecutive messages from the same sender within this window are
@@ -703,6 +706,26 @@ private fun MessageRow(
                 }
                 if (message.text.isNotBlank()) {
                     MessageBodyText(text = message.text, align = bodyAlign)
+                }
+            }
+
+            "sticker" -> {
+                val path = message.stickerPath
+                if (path != null) {
+                    val bitmap by rememberDecodedImage(path)
+                    if (bitmap != null) {
+                        Image(
+                            bitmap = bitmap!!,
+                            contentDescription = "Sticker",
+                            modifier = Modifier
+                                .size(STICKER_SIZE_DP)
+                                .padding(bottom = 4.dp),
+                        )
+                    } else {
+                        MessageBodyText(text = "[Sticker]", lighten = true, align = bodyAlign)
+                    }
+                } else {
+                    MessageBodyText(text = "[Sticker]", lighten = true, align = bodyAlign)
                 }
             }
 
