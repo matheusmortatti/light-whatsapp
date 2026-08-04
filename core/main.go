@@ -90,9 +90,18 @@ type command struct {
 // documents, stickers, polls, reactions, ...) is dropped during extraction,
 // per the app's scope.
 type chatMessage struct {
-	ID         string `json:"id"`
-	Timestamp  int64  `json:"timestamp"`
-	FromMe     bool   `json:"from_me"`
+	ID        string `json:"id"`
+	Timestamp int64  `json:"timestamp"`
+	FromMe    bool   `json:"from_me"`
+
+	// Sent -> delivered -> read status for a message *we* sent in a 1:1
+	// chat, driven by handleSentMessageStatusReceipt. Never set for
+	// incoming messages or group chats (WhatsApp only reports "read" once
+	// every group member has read a message, which needs per-recipient
+	// aggregation this app doesn't do yet). "" means unknown/not
+	// applicable, not "unsent".
+	Status string `json:"status,omitempty"` // "sent" | "delivered" | "read"
+
 	Sender     string `json:"sender,omitempty"`      // sender JID, group chats only
 	SenderName string `json:"sender_name,omitempty"` // best-effort display name, group chats only
 	Type       string `json:"type"`                  // "text" | "image" | "audio"
@@ -742,6 +751,73 @@ func handleReadReceipt(ctx context.Context, client *whatsmeow.Client, evt *event
 	emit(event{Type: "chats", Chats: updated})
 }
 
+// receiptStatusFor maps evt to the chatMessage.Status it implies for a
+// message *we* sent, or "" if this receipt doesn't carry that (it's the
+// self-read-sync case handleReadReceipt already handles, a group chat — see
+// chatMessage.Status — or a receipt type this app doesn't track).
+func receiptStatusFor(evt *events.Receipt) string {
+	if evt.MessageSource.IsFromMe || evt.MessageSource.IsGroup {
+		return ""
+	}
+	switch evt.Type {
+	case types.ReceiptTypeDelivered:
+		return "delivered"
+	case types.ReceiptTypeRead:
+		return "read"
+	default:
+		return ""
+	}
+}
+
+// applyMessageStatus sets Status to status, in place, on every message in
+// list whose ID is in ids and is FromMe — except it never downgrades an
+// existing "read" back to "delivered" (a delivered receipt can in
+// principle arrive after a read one, out of order). Returns whether
+// anything changed.
+func applyMessageStatus(list []chatMessage, ids []types.MessageID, status string) bool {
+	idSet := make(map[types.MessageID]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	changed := false
+	for i, m := range list {
+		if !m.FromMe || !idSet[m.ID] || m.Status == "read" {
+			continue
+		}
+		list[i].Status = status
+		changed = true
+	}
+	return changed
+}
+
+// handleSentMessageStatusReceipt reacts to a *events.Receipt telling us the
+// actual recipient (not our own read-sync — see handleReadReceipt) received
+// or read a message we sent, updating that message's Status and re-emitting
+// the chat's messages so the UI updates live.
+func handleSentMessageStatusReceipt(ctx context.Context, client *whatsmeow.Client, evt *events.Receipt, messages map[string][]chatMessage) {
+	status := receiptStatusFor(evt)
+	if status == "" {
+		return
+	}
+	jidStr := canonicalizeChatJID(ctx, client, evt.MessageSource.Chat).String()
+
+	messagesMu.Lock()
+	list, ok := messages[jidStr]
+	if !ok {
+		messagesMu.Unlock()
+		return
+	}
+	changed := applyMessageStatus(list, evt.MessageIDs, status)
+	if changed {
+		saveMessages(jidStr, list)
+	}
+	messagesMu.Unlock()
+
+	if changed {
+		emit(event{Type: "messages", JID: jidStr, Messages: resolveMentionsInList(ctx, client, list)})
+	}
+}
+
 // handleOpenChat responds to the app requesting one chat's messages: emits
 // what's already known (from history sync and/or prior live messages)
 // immediately, then downloads any images in that batch that haven't been
@@ -814,10 +890,15 @@ func handleSendMessage(ctx context.Context, client *whatsmeow.Client, logger waL
 	chatsMu.Unlock()
 	emit(event{Type: "chats", Chats: list})
 
+	status := "sent"
+	if c.IsGroup {
+		status = ""
+	}
 	cm := chatMessage{
 		ID:        resp.ID,
 		Timestamp: timestamp,
 		FromMe:    true,
+		Status:    status,
 		Type:      "text",
 		Text:      text,
 	}
@@ -1410,6 +1491,7 @@ func main() {
 			handleMessage(ctx, client, logger, e, chats, messages)
 		case *events.Receipt:
 			handleReadReceipt(ctx, client, e, chats)
+			handleSentMessageStatusReceipt(ctx, client, e, messages)
 		case *events.Contact:
 			refreshContactName(ctx, client, e.JID, chats)
 		case *events.PushName:
