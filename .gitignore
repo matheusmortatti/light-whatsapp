@@ -53,6 +53,7 @@ __pycache__/
 *.exe
 
 ### Go (core/) ###
+core/core
 core/*.db
 core/*.db-shm
 core/*.db-wal
