@@ -298,7 +298,27 @@ new, ours, not part of upstream.
    stdin, see Architecture above); *sending* messages themselves (a new
    `send_message` command, `core/` calling whatsmeow's send APIs) is still
    open.
-9. Groups are already handled in chat viewing (sender names, `is_group`);
+9. ~~Groups are already handled in chat viewing (sender names, `is_group`);
    remaining polish: the known per-chat-backlog gap above, and images
    currently being the only non-text media type (video/audio/documents
-   still dropped during extraction).
+   still dropped during extraction).~~
+10. Video, GIF, and sticker messages (receive-only, same scope as images —
+    see `docs/superpowers/specs/2026-08-03-video-gif-sticker-design.md`)
+    — done and verified end-to-end on real LP3 hardware (2026-08-04,
+    `LP3LHMA551300893`, self-chat). `core/` extracts video/GIF (a
+    `VideoMessage` with `GifPlayback` set — WhatsApp has no separate GIF
+    type) and sticker messages the same way it already did images/audio;
+    downloads lazily on `open_chat`/live arrival. `app/` shows a
+    first-frame thumbnail (via `MediaMetadataRetriever`) with a
+    tap-to-play full-screen player (`VideoView`, no new dependency) for
+    video/GIF, and renders stickers through the existing image-decode path
+    (animated WebP shows its first frame only, not animated — accepted
+    limitation, not a bug). Confirmed on-device: a real pre-existing video
+    message rendered a thumbnail and played correctly; a live GIF sent from
+    another WhatsApp client rendered and looped correctly; a live sticker
+    rendered correctly; all three survived a force-stop/relaunch without
+    getting stranded as an undownloaded placeholder (the same class of bug
+    the image pipeline hit early on — re-checked deliberately here). Audio
+    and documents remain the only dropped-at-extraction media types now.
+    Sending any media type (video/GIF/sticker/image alike) remains out of
+    scope for this pass — the app has always been receive-only for media.
