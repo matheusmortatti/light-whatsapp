@@ -177,13 +177,14 @@ var emitMu sync.Mutex
 // goroutine dispatches *events.Connected — both mutate the same map.
 var chatsMu sync.Mutex
 
-// videoDownloadSem caps how many videos downloadVideo fetches concurrently.
-// handleOpenChat dispatches one goroutine per undownloaded video with no
-// limit of its own, and videos (unlike images/audio/stickers) can run tens
-// of MB each — on core's own hardware (the Light Phone III itself),
-// unbounded concurrent multi-MB downloads risk an OOM. Acquired/released
-// inside downloadVideo itself so the cap is self-contained there.
-var videoDownloadSem = make(chan struct{}, 2)
+// mediaDownloadSem caps how many media downloads — image, audio, video, or
+// sticker — run concurrently across all four types. handleOpenChat
+// dispatches one goroutine per undownloaded item in a newly opened chat
+// with no limit of its own; a chat with a large backlog would otherwise
+// open that many simultaneous HTTPS downloads at once on core's own
+// hardware (the Light Phone III itself). Acquired/released inside
+// downloadMedia itself so the cap is self-contained there.
+var mediaDownloadSem = make(chan struct{}, 3)
 
 // openChatJID is the chat the app currently has on screen, set by
 // handleOpenChat and cleared by a "close_chat" command (see readCommands).
@@ -669,27 +670,54 @@ func imagePath(jid, msgID, mimetype string) string {
 	return filepath.Join("media", jid, msgID+"."+imageExtension(mimetype))
 }
 
-// downloadImage fetches an image message's media (using the persisted
-// download reference set by setImageFields, not the original *waE2E.
-// ImageMessage — that doesn't survive a process restart, this does), writes
-// it to disk, and updates the stored chatMessage with the resulting path,
-// clearing the now-unneeded key material and emitting a message_update for
-// it so the app can render it once it lands. Meant to run in its own
-// goroutine — image messages show up caption/placeholder-only until this
+// downloadMedia fetches one message's media, streaming straight to disk via
+// DownloadMediaWithPathToFile rather than buffering the whole decrypted
+// file in memory first — core runs on the Light Phone III itself, and a
+// pile of simultaneous multi-MB in-memory buffers is a real OOM risk.
+// mediaDownloadSem bounds how many of these run concurrently, regardless of
+// type, since handleOpenChat can dispatch one goroutine per undownloaded
+// item in a chat with no limit of its own. Once the file lands, apply is
+// called with a pointer into the stored chatMessage to fill in the
+// type-specific path and clear that type's now-unneeded key material, and a
+// message_update is emitted for it. Meant to run in its own goroutine —
+// image/audio/video/sticker messages show up placeholder-only until this
 // completes.
-func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage, jid string, m chatMessage) {
-	data, err := client.DownloadMediaWithPath(ctx, m.ImageDirectPath, m.ImageFileEncSHA256, m.ImageFileSHA256, m.ImageMediaKey, whatsmeow.MediaImage, "", false)
-	if err != nil {
-		logger.Warnf("failed to download image %s/%s: %v", jid, m.ID, err)
-		return
-	}
-	path := imagePath(jid, m.ID, m.ImageMimetype)
+func downloadMedia(
+	ctx context.Context,
+	client *whatsmeow.Client,
+	logger waLog.Logger,
+	messages map[string][]chatMessage,
+	jid string,
+	m chatMessage,
+	kind string,
+	mediaType whatsmeow.MediaType,
+	directPath string,
+	fileEncSHA256, fileSHA256, mediaKey []byte,
+	path string,
+	apply func(cm *chatMessage, path string),
+) {
+	mediaDownloadSem <- struct{}{}
+	defer func() { <-mediaDownloadSem }()
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		logger.Warnf("failed to create media dir for %s: %v", jid, err)
 		return
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		logger.Warnf("failed to write image %s/%s: %v", jid, m.ID, err)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		logger.Warnf("failed to create %s file %s/%s: %v", kind, jid, m.ID, err)
+		return
+	}
+	err = client.DownloadMediaWithPathToFile(ctx, directPath, fileEncSHA256, fileSHA256, mediaKey, mediaType, "", false, f)
+	closeErr := f.Close()
+	if err != nil {
+		logger.Warnf("failed to download %s %s/%s: %v", kind, jid, m.ID, err)
+		_ = os.Remove(path)
+		return
+	}
+	if closeErr != nil {
+		logger.Warnf("failed to close %s file %s/%s: %v", kind, jid, m.ID, closeErr)
+		_ = os.Remove(path)
 		return
 	}
 
@@ -700,12 +728,7 @@ func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	if ok {
 		for i, cur := range list {
 			if cur.ID == m.ID {
-				list[i].ImagePath = path
-				list[i].ImageDirectPath = ""
-				list[i].ImageMediaKey = nil
-				list[i].ImageFileSHA256 = nil
-				list[i].ImageFileEncSHA256 = nil
-				list[i].ImageMimetype = ""
+				apply(&list[i], path)
 				updated = list[i]
 				found = true
 				break
@@ -719,6 +742,24 @@ func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	if found {
 		emit(event{Type: "message_update", JID: jid, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
 	}
+}
+
+// downloadImage fetches an image message's media (using the persisted
+// download reference set by setImageFields, not the original *waE2E.
+// ImageMessage — that doesn't survive a process restart, this does). See
+// downloadMedia.
+func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage, jid string, m chatMessage) {
+	path := imagePath(jid, m.ID, m.ImageMimetype)
+	downloadMedia(ctx, client, logger, messages, jid, m, "image", whatsmeow.MediaImage,
+		m.ImageDirectPath, m.ImageFileEncSHA256, m.ImageFileSHA256, m.ImageMediaKey, path,
+		func(cm *chatMessage, path string) {
+			cm.ImagePath = path
+			cm.ImageDirectPath = ""
+			cm.ImageMediaKey = nil
+			cm.ImageFileSHA256 = nil
+			cm.ImageFileEncSHA256 = nil
+			cm.ImageMimetype = ""
+		})
 }
 
 // audioExtension maps a media mimetype to a file extension. WhatsApp voice
@@ -744,52 +785,20 @@ func audioPath(jid, msgID, mimetype string) string {
 }
 
 // downloadAudio is downloadImage's counterpart for audio messages: fetches
-// the media (using the persisted download reference set by setAudioFields),
-// writes it to disk, and updates the stored chatMessage with the resulting
-// path, emitting a message_update for it so the app can render a player
-// once it lands. Meant to run in its own goroutine.
+// the media using the persisted download reference set by setAudioFields.
+// See downloadMedia.
 func downloadAudio(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage, jid string, m chatMessage) {
-	data, err := client.DownloadMediaWithPath(ctx, m.AudioDirectPath, m.AudioFileEncSHA256, m.AudioFileSHA256, m.AudioMediaKey, whatsmeow.MediaAudio, "", false)
-	if err != nil {
-		logger.Warnf("failed to download audio %s/%s: %v", jid, m.ID, err)
-		return
-	}
 	path := audioPath(jid, m.ID, m.AudioMimetype)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		logger.Warnf("failed to create media dir for %s: %v", jid, err)
-		return
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		logger.Warnf("failed to write audio %s/%s: %v", jid, m.ID, err)
-		return
-	}
-
-	messagesMu.Lock()
-	list, ok := messages[jid]
-	var updated chatMessage
-	found := false
-	if ok {
-		for i, cur := range list {
-			if cur.ID == m.ID {
-				list[i].AudioPath = path
-				list[i].AudioDirectPath = ""
-				list[i].AudioMediaKey = nil
-				list[i].AudioFileSHA256 = nil
-				list[i].AudioFileEncSHA256 = nil
-				list[i].AudioMimetype = ""
-				updated = list[i]
-				found = true
-				break
-			}
-		}
-		messages[jid] = list
-		saveMessages(jid, list)
-	}
-	messagesMu.Unlock()
-
-	if found {
-		emit(event{Type: "message_update", JID: jid, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
-	}
+	downloadMedia(ctx, client, logger, messages, jid, m, "audio", whatsmeow.MediaAudio,
+		m.AudioDirectPath, m.AudioFileEncSHA256, m.AudioFileSHA256, m.AudioMediaKey, path,
+		func(cm *chatMessage, path string) {
+			cm.AudioPath = path
+			cm.AudioDirectPath = ""
+			cm.AudioMediaKey = nil
+			cm.AudioFileSHA256 = nil
+			cm.AudioFileEncSHA256 = nil
+			cm.AudioMimetype = ""
+		})
 }
 
 // videoExtension maps a media mimetype to a file extension; WhatsApp videos
@@ -809,73 +818,20 @@ func videoPath(jid, msgID, mimetype string) string {
 }
 
 // downloadVideo is downloadImage's counterpart for video/GIF messages:
-// fetches the media (using the persisted download reference set by
-// setVideoFields), writes it to disk, and updates the stored chatMessage
-// with the resulting path, emitting a message_update for it so the app
-// can render a thumbnail/player once it lands. Meant to run in its own
-// goroutine.
-//
-// Unlike downloadImage/downloadAudio/downloadSticker, this streams straight
-// to disk via DownloadMediaWithPathToFile instead of buffering the whole
-// file in memory first — videos can be tens of MB (vs. the ~100KB-1MB
-// images/audio/stickers see), and core runs on the Light Phone III itself,
-// so a pile of simultaneous multi-MB in-memory buffers is a real OOM risk.
-// videoDownloadSem also caps how many of these run at once, since
-// handleOpenChat can dispatch one goroutine per undownloaded video in a
-// chat with no limit of its own.
+// fetches the media using the persisted download reference set by
+// setVideoFields. See downloadMedia.
 func downloadVideo(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage, jid string, m chatMessage) {
-	videoDownloadSem <- struct{}{}
-	defer func() { <-videoDownloadSem }()
-
 	path := videoPath(jid, m.ID, m.VideoMimetype)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		logger.Warnf("failed to create media dir for %s: %v", jid, err)
-		return
-	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		logger.Warnf("failed to create video file %s/%s: %v", jid, m.ID, err)
-		return
-	}
-	err = client.DownloadMediaWithPathToFile(ctx, m.VideoDirectPath, m.VideoFileEncSHA256, m.VideoFileSHA256, m.VideoMediaKey, whatsmeow.MediaVideo, "", false, f)
-	closeErr := f.Close()
-	if err != nil {
-		logger.Warnf("failed to download video %s/%s: %v", jid, m.ID, err)
-		_ = os.Remove(path)
-		return
-	}
-	if closeErr != nil {
-		logger.Warnf("failed to close video file %s/%s: %v", jid, m.ID, closeErr)
-		_ = os.Remove(path)
-		return
-	}
-
-	messagesMu.Lock()
-	list, ok := messages[jid]
-	var updated chatMessage
-	found := false
-	if ok {
-		for i, cur := range list {
-			if cur.ID == m.ID {
-				list[i].VideoPath = path
-				list[i].VideoDirectPath = ""
-				list[i].VideoMediaKey = nil
-				list[i].VideoFileSHA256 = nil
-				list[i].VideoFileEncSHA256 = nil
-				list[i].VideoMimetype = ""
-				updated = list[i]
-				found = true
-				break
-			}
-		}
-		messages[jid] = list
-		saveMessages(jid, list)
-	}
-	messagesMu.Unlock()
-
-	if found {
-		emit(event{Type: "message_update", JID: jid, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
-	}
+	downloadMedia(ctx, client, logger, messages, jid, m, "video", whatsmeow.MediaVideo,
+		m.VideoDirectPath, m.VideoFileEncSHA256, m.VideoFileSHA256, m.VideoMediaKey, path,
+		func(cm *chatMessage, path string) {
+			cm.VideoPath = path
+			cm.VideoDirectPath = ""
+			cm.VideoMediaKey = nil
+			cm.VideoFileSHA256 = nil
+			cm.VideoFileEncSHA256 = nil
+			cm.VideoMimetype = ""
+		})
 }
 
 // stickerExtension maps a media mimetype to a file extension; WhatsApp
@@ -896,49 +852,19 @@ func stickerPath(jid, msgID, mimetype string) string {
 // downloadSticker is downloadImage's counterpart for sticker messages.
 // Stickers download as whatsmeow.MediaImage (confirmed via whatsmeow's
 // classToMediaType map in download.go — there's no separate sticker media
-// type). Meant to run in its own goroutine.
+// type). See downloadMedia.
 func downloadSticker(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, messages map[string][]chatMessage, jid string, m chatMessage) {
-	data, err := client.DownloadMediaWithPath(ctx, m.StickerDirectPath, m.StickerFileEncSHA256, m.StickerFileSHA256, m.StickerMediaKey, whatsmeow.MediaImage, "", false)
-	if err != nil {
-		logger.Warnf("failed to download sticker %s/%s: %v", jid, m.ID, err)
-		return
-	}
 	path := stickerPath(jid, m.ID, m.StickerMimetype)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		logger.Warnf("failed to create media dir for %s: %v", jid, err)
-		return
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		logger.Warnf("failed to write sticker %s/%s: %v", jid, m.ID, err)
-		return
-	}
-
-	messagesMu.Lock()
-	list, ok := messages[jid]
-	var updated chatMessage
-	found := false
-	if ok {
-		for i, cur := range list {
-			if cur.ID == m.ID {
-				list[i].StickerPath = path
-				list[i].StickerDirectPath = ""
-				list[i].StickerMediaKey = nil
-				list[i].StickerFileSHA256 = nil
-				list[i].StickerFileEncSHA256 = nil
-				list[i].StickerMimetype = ""
-				updated = list[i]
-				found = true
-				break
-			}
-		}
-		messages[jid] = list
-		saveMessages(jid, list)
-	}
-	messagesMu.Unlock()
-
-	if found {
-		emit(event{Type: "message_update", JID: jid, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
-	}
+	downloadMedia(ctx, client, logger, messages, jid, m, "sticker", whatsmeow.MediaImage,
+		m.StickerDirectPath, m.StickerFileEncSHA256, m.StickerFileSHA256, m.StickerMediaKey, path,
+		func(cm *chatMessage, path string) {
+			cm.StickerPath = path
+			cm.StickerDirectPath = ""
+			cm.StickerMediaKey = nil
+			cm.StickerFileSHA256 = nil
+			cm.StickerFileEncSHA256 = nil
+			cm.StickerMimetype = ""
+		})
 }
 
 // markChatRead sends WhatsApp read receipts for every not-from-me message in
