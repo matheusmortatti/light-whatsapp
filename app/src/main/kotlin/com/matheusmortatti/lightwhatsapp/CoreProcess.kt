@@ -27,6 +27,10 @@ data class Message(
     val id: String,
     val timestamp: Long,
     val fromMe: Boolean,
+    // "sent" | "delivered" | "read", 1:1 chats only — null for group chats,
+    // incoming messages, and messages sent before this field existed. See
+    // core/main.go's chatMessage.Status.
+    val status: String?,
     val senderName: String?,
     val type: String,
     val text: String,
@@ -199,6 +203,7 @@ class CoreProcess(private val context: Context) {
                 id = o.getString("id"),
                 timestamp = o.optLong("timestamp", 0L),
                 fromMe = o.optBoolean("from_me", false),
+                status = o.optString("status").ifBlank { null },
                 senderName = o.optString("sender_name").ifBlank { null },
                 type = o.optString("type", "text"),
                 text = o.optString("text"),

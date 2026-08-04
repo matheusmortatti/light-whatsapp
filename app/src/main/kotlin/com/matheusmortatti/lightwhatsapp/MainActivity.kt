@@ -460,6 +460,16 @@ private fun ChatDetailScreen(
                 )
             }
         } else {
+            // Status (see MessageRow) only matters on the message you sent
+            // most recently — WhatsApp's own ticks work the same way, older
+            // sent messages aren't worth the visual noise. Explicitly null
+            // in group chats (rather than relying on message.status being
+            // empty there) — otherwise the last own message in a group
+            // would still get its header forced visible below, for a
+            // status suffix that never renders.
+            val lastOwnMessageId = remember(messages, chat.isGroup) {
+                if (chat.isGroup) null else messages.lastOrNull { it.fromMe }?.id
+            }
             LightLazyScrollView(
                 modifier = Modifier
                     .weight(1f)
@@ -476,6 +486,7 @@ private fun ChatDetailScreen(
                         (message.timestamp - previous.timestamp) <= MESSAGE_CLUSTER_WINDOW_SECONDS
                     val dateChanged = previous == null || !isSameLocalDate(previous.timestamp, message.timestamp)
                     val showHeader = dateChanged || !(sameSender && withinClusterWindow)
+                    val showStatus = message.id == lastOwnMessageId
                     Column {
                         if (dateChanged) {
                             DateSeparator(
@@ -491,7 +502,8 @@ private fun ChatDetailScreen(
                             message = message,
                             isGroup = chat.isGroup,
                             chatName = chat.name,
-                            showHeader = showHeader,
+                            showHeader = showHeader || showStatus,
+                            showStatus = showStatus,
                             modifier = Modifier.padding(
                                 start = 24.dp,
                                 end = 24.dp,
@@ -499,7 +511,7 @@ private fun ChatDetailScreen(
                                 // (fontSize * 1.5 lineHeight, ~10-12dp on this
                                 // screen) or separate clustered messages read as
                                 // one wrapped message.
-                                top = if (showHeader) 14.dp else 9.dp,
+                                top = if (showHeader || showStatus) 14.dp else 9.dp,
                             ),
                         )
                     }
@@ -557,6 +569,16 @@ private fun formatMessageTime(timestampSeconds: Long): String =
     java.time.Instant.ofEpochSecond(timestampSeconds)
         .atZone(java.time.ZoneId.systemDefault())
         .format(messageTimeFormatter)
+
+// message.status is only ever "sent" | "delivered" | "read" | null (see
+// core/main.go's chatMessage.Status) — anything else (including null)
+// renders no suffix at all.
+private fun formatMessageStatus(status: String?): String? = when (status) {
+    "sent" -> "Sent"
+    "delivered" -> "Delivered"
+    "read" -> "Read"
+    else -> null
+}
 
 private fun localDateOf(timestampSeconds: Long): java.time.LocalDate =
     java.time.Instant.ofEpochSecond(timestampSeconds)
@@ -632,6 +654,7 @@ private fun MessageRow(
     isGroup: Boolean,
     chatName: String,
     showHeader: Boolean,
+    showStatus: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val bodyAlign = if (message.fromMe) TextAlign.End else TextAlign.Start
@@ -649,9 +672,13 @@ private fun MessageRow(
                 isGroup -> message.senderName?.takeIf { it.isNotBlank() } ?: chatName
                 else -> chatName
             }
+            val statusLabel = if (showStatus) formatMessageStatus(message.status) else null
             Row {
                 ChatMetaText(text = senderLabel)
                 ChatMetaText(text = "  " + formatMessageTime(message.timestamp))
+                if (statusLabel != null) {
+                    ChatMetaText(text = " · $statusLabel")
+                }
             }
         }
 
