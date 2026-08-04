@@ -43,8 +43,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -532,11 +536,7 @@ private fun formatMessageDate(timestampSeconds: Long): String {
 @Composable
 private fun DateSeparator(timestampSeconds: Long, modifier: Modifier = Modifier) {
     Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        LightText(
-            text = formatMessageDate(timestampSeconds),
-            variant = LightTextVariant.Fine,
-            lighten = true,
-        )
+        ChatMetaText(text = formatMessageDate(timestampSeconds))
     }
 }
 
@@ -589,6 +589,7 @@ private fun MessageRow(
     showHeader: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val bodyAlign = if (message.fromMe) TextAlign.End else TextAlign.Start
     Column(
         modifier = modifier.fillMaxWidth(),
         horizontalAlignment = if (message.fromMe) Alignment.End else Alignment.Start,
@@ -604,16 +605,8 @@ private fun MessageRow(
                 else -> chatName
             }
             Row {
-                LightText(
-                    text = senderLabel,
-                    variant = LightTextVariant.Fine,
-                    lighten = true,
-                )
-                LightText(
-                    text = "  " + formatMessageTime(message.timestamp),
-                    variant = LightTextVariant.Fine,
-                    lighten = true,
-                )
+                ChatMetaText(text = senderLabel)
+                ChatMetaText(text = "  " + formatMessageTime(message.timestamp))
             }
         }
 
@@ -631,13 +624,13 @@ private fun MessageRow(
                                 .padding(bottom = 4.dp),
                         )
                     } else {
-                        LightText(text = "[Photo]", variant = LightTextVariant.Copy, lighten = true)
+                        MessageBodyText(text = "[Photo]", lighten = true, align = bodyAlign)
                     }
                 } else {
-                    LightText(text = "[Photo]", variant = LightTextVariant.Copy, lighten = true)
+                    MessageBodyText(text = "[Photo]", lighten = true, align = bodyAlign)
                 }
                 if (message.text.isNotBlank()) {
-                    MessageBodyText(text = message.text)
+                    MessageBodyText(text = message.text, align = bodyAlign)
                 }
             }
 
@@ -646,11 +639,11 @@ private fun MessageRow(
                 if (path != null) {
                     AudioMessageRow(relativePath = path, seconds = message.audioSeconds)
                 } else {
-                    LightText(text = "[Voice message]", variant = LightTextVariant.Copy, lighten = true)
+                    MessageBodyText(text = "[Voice message]", lighten = true, align = bodyAlign)
                 }
             }
 
-            else -> MessageBodyText(text = message.text)
+            else -> MessageBodyText(text = message.text, align = bodyAlign)
         }
     }
 }
@@ -664,17 +657,72 @@ private fun MessageRow(
 // the shared Copy token (which other Light SDK consumers rely on).
 private const val MESSAGE_LINE_HEIGHT_MULTIPLIER = 1.15f
 
+// Copy's full size is tuned for short standalone lines elsewhere in the app;
+// message bubbles are dense and small-screen space is scarce, so bodies run
+// smaller than Copy.
+private const val MESSAGE_FONT_SCALE = 0.75f
+
+// Sender/timestamp headers and date separators are scaled by the same
+// factor as the body (see MESSAGE_FONT_SCALE) so the whole chat screen
+// shrinks together and keeps its original size relationship (Fine was
+// already smaller than Copy before either was scaled down).
+private const val HEADER_FONT_SCALE = MESSAGE_FONT_SCALE
+
+// Applies a uniform size scale to a design-token TextStyle, working in the
+// same raw design-px units the token's fontSize/lineHeight/letterSpacing
+// are authored in (see designVerticalPxToSp) rather than already-resolved
+// sp, so it composes correctly with LightTheme's screen-height scaling.
+// lineHeightMultiplier overrides the token's own fontSize:lineHeight ratio
+// when a tighter (or looser) one is needed at the new size.
 @Composable
-private fun MessageBodyText(text: String, modifier: Modifier = Modifier) {
-    val base = LightThemeTokens.typography.copy
-    val style = base.copy(
-        fontSize = base.fontSize.value.designVerticalPxToSp(),
-        lineHeight = (base.fontSize.value * MESSAGE_LINE_HEIGHT_MULTIPLIER).designVerticalPxToSp(),
+private fun scaledStyle(base: TextStyle, scale: Float, lineHeightMultiplier: Float? = null): TextStyle {
+    val scaledFontSizePx = base.fontSize.value * scale
+    val ratio = lineHeightMultiplier
+        ?: if (base.lineHeight.isSpecified) base.lineHeight.value / base.fontSize.value else 1f
+    val scaledLetterSpacing = if (base.letterSpacing.isSpecified) {
+        (base.letterSpacing.value * scale).designVerticalPxToSp()
+    } else {
+        base.letterSpacing
+    }
+    return base.copy(
+        fontSize = scaledFontSizePx.designVerticalPxToSp(),
+        lineHeight = (scaledFontSizePx * ratio).designVerticalPxToSp(),
+        letterSpacing = scaledLetterSpacing,
     )
+}
+
+// align matters beyond cosmetics here: a wrapping multi-line message measures
+// at the FULL available width (Compose sizes a soft-wrapped Text to its
+// constraint, not its longest line), so Column's End alignment alone doesn't
+// pull a sent message's lines to the right — each line still defaults to
+// TextAlign.Start inside that full-width box unless told otherwise.
+@Composable
+private fun MessageBodyText(
+    text: String,
+    modifier: Modifier = Modifier,
+    lighten: Boolean = false,
+    align: TextAlign = TextAlign.Start,
+) {
+    val style = scaledStyle(LightThemeTokens.typography.copy, MESSAGE_FONT_SCALE, MESSAGE_LINE_HEIGHT_MULTIPLIER)
+        .copy(textAlign = align)
     Text(
         text = text,
         modifier = modifier,
-        color = LightThemeTokens.colors.content,
+        color = if (lighten) LightThemeTokens.colors.contentSecondary else LightThemeTokens.colors.content,
+        style = style,
+    )
+}
+
+// Sender name / timestamp header above a message, and the date separator
+// between days — both were LightTextVariant.Fine, scaled down in step with
+// MessageBodyText (see HEADER_FONT_SCALE).
+@Composable
+private fun ChatMetaText(text: String, modifier: Modifier = Modifier) {
+    val style = scaledStyle(LightThemeTokens.typography.fine, HEADER_FONT_SCALE)
+    Text(
+        text = text,
+        modifier = modifier,
+        color = LightThemeTokens.colors.contentSecondary,
         style = style,
     )
 }
@@ -736,7 +784,7 @@ private fun AudioMessageRow(relativePath: String, seconds: Int, modifier: Modifi
     ) {
         LightIcon(
             icon = if (isPlaying) LightIcons.PAUSE else LightIcons.PLAY,
-            size = 1.5f,
+            size = AUDIO_ICON_SIZE_GRID_UNITS,
             contentDescription = if (isPlaying) "Pause" else "Play",
             modifier = Modifier.lightClickable {
                 if (!prepared) return@lightClickable
@@ -754,7 +802,7 @@ private fun AudioMessageRow(relativePath: String, seconds: Int, modifier: Modifi
         Box(
             modifier = Modifier
                 .padding(start = 8.dp)
-                .size(1.5f.gridUnitsAsDp()),
+                .size(AUDIO_ICON_SIZE_GRID_UNITS.gridUnitsAsDp()),
             contentAlignment = Alignment.Center,
         ) {
             // Only once there's actual progress to discard — matches "after
@@ -762,7 +810,7 @@ private fun AudioMessageRow(relativePath: String, seconds: Int, modifier: Modifi
             if (remainingMs < durationMs) {
                 LightIcon(
                     icon = LightIcons.REWIND,
-                    size = 1.5f,
+                    size = AUDIO_ICON_SIZE_GRID_UNITS,
                     contentDescription = "Restart from beginning",
                     modifier = Modifier.lightClickable {
                         mediaPlayer.seekTo(0)
@@ -773,10 +821,16 @@ private fun AudioMessageRow(relativePath: String, seconds: Int, modifier: Modifi
         }
         // Fixed width + monospace digits so neither a changing digit count
         // nor per-glyph width differences (e.g. "1" vs "0") reflow the row.
-        LightText(
+        // Deliberately a notch above MessageBodyText's scale — it's the one
+        // number on the row doing double duty as a label, so it reads best
+        // slightly bigger than surrounding prose rather than matching it.
+        val durationStyle = scaledStyle(LightThemeTokens.typography.copy, AUDIO_DURATION_FONT_SCALE)
+            .copy(fontFamily = FontFamily.Monospace, textAlign = TextAlign.End)
+        Text(
             text = formatDuration(remainingMs / 1000),
-            variant = LightTextVariant.Copy,
-            monospace = true,
+            style = durationStyle,
+            color = LightThemeTokens.colors.content,
+            maxLines = 1,
             modifier = Modifier
                 .padding(start = 8.dp)
                 .width(AUDIO_DURATION_TEXT_WIDTH_GRID_UNITS.gridUnitsAsDp()),
@@ -784,7 +838,20 @@ private fun AudioMessageRow(relativePath: String, seconds: Int, modifier: Modifi
     }
 }
 
-private const val AUDIO_DURATION_TEXT_WIDTH_GRID_UNITS = 3.5f
+// Wide enough to fit "0:00"-"99:59" in monospace with slack for real-device
+// font metrics (the real LP3's system monospace renders slightly wider than
+// the emulator's, which was clipping/wrapping the last digit onto a second
+// line). maxLines = 1 on the Text below is the hard backstop.
+private const val AUDIO_DURATION_TEXT_WIDTH_GRID_UNITS = 4.5f
+
+private const val AUDIO_DURATION_FONT_SCALE = 0.85f
+
+// Play/rewind were originally sized (1.5 grid units) to sit next to a
+// full-Copy-size duration label; scaled down in step with
+// AUDIO_DURATION_FONT_SCALE so they stay visually balanced against it
+// instead of towering over the now-smaller text.
+private const val AUDIO_ICON_BASE_SIZE_GRID_UNITS = 1.5f
+private const val AUDIO_ICON_SIZE_GRID_UNITS = AUDIO_ICON_BASE_SIZE_GRID_UNITS * AUDIO_DURATION_FONT_SCALE
 
 private const val AUDIO_POSITION_POLL_MS = 200L
 
