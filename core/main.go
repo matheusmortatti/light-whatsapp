@@ -1395,7 +1395,7 @@ func handleSendReaction(ctx context.Context, client *whatsmeow.Client, logger wa
 	found := false
 	for i, cur := range list {
 		if cur.ID == messageID {
-			cur.Reactions = applyReaction(cur.Reactions, client.Store.ID.String(), "", true, emoji)
+			cur.Reactions = applyReaction(cur.Reactions, client.Store.ID.ToNonAD().String(), "", true, emoji)
 			list[i] = cur
 			updated = cur
 			found = true
