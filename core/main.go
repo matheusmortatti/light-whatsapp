@@ -84,14 +84,18 @@ type event struct {
 // something — "open_chat" to fetch (and start filling in images/audio for)
 // one conversation's messages and mark it read, "close_chat" to tell core
 // the app navigated away (see openChatJID), "send_message" to send a text
-// message to a jid, or "send_audio" to upload and send a recorded voice
-// message (AudioPath, relative to the working dir, plus its DurationMs).
+// message to a jid, "send_audio" to upload and send a recorded voice
+// message (AudioPath, relative to the working dir, plus its DurationMs), or
+// "send_reaction" to react to an existing message (MessageID) with Emoji
+// ("" removes a previously-sent reaction).
 type command struct {
 	Type       string `json:"type"`
 	JID        string `json:"jid,omitempty"`
 	Text       string `json:"text,omitempty"`
 	AudioPath  string `json:"audio_path,omitempty"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
+	MessageID  string `json:"message_id,omitempty"`
+	Emoji      string `json:"emoji,omitempty"`
 }
 
 // chatMessage is one message within a chat, as sent to the app. Only text,
@@ -159,9 +163,8 @@ type chatMessage struct {
 	StickerFileEncSHA256 []byte `json:"sticker_file_enc_sha256,omitempty"`
 	StickerMimetype      string `json:"sticker_mimetype,omitempty"`
 
-	// Reactions on this message, received live (see handleReaction) — never
-	// set for a message this app sends, since sending a reaction isn't
-	// supported.
+	// Reactions on this message (see handleReaction and handleSendReaction),
+	// populated live whether the message is ours or someone else's.
 	Reactions []chatReaction `json:"reactions,omitempty"`
 }
 
@@ -1343,6 +1346,73 @@ func handleSendAudio(ctx context.Context, client *whatsmeow.Client, logger waLog
 	emit(event{Type: "message_update", JID: jidStr, Messages: resolveMentionsInList(ctx, client, []chatMessage{cm})})
 }
 
+// handleSendReaction sends emoji as a reaction to messageID within jidStr
+// via WhatsApp (emoji == "" removes a previously-sent reaction — see
+// whatsmeow.RemoveReactionText), then folds it into the local cache the
+// same way handleReaction does for an incoming one, since WhatsApp doesn't
+// echo our own outgoing reaction back as an event (mirrors handleSendMessage
+// not waiting for its own text message to echo back either).
+func handleSendReaction(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, jidStr, messageID, emoji string, messages map[string][]chatMessage) {
+	jid, err := types.ParseJID(jidStr)
+	if err != nil {
+		logger.Warnf("send_reaction: bad jid %q: %v", jidStr, err)
+		return
+	}
+
+	messagesMu.Lock()
+	list := messages[jidStr]
+	idx := -1
+	for i, m := range list {
+		if m.ID == messageID {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		messagesMu.Unlock()
+		logger.Warnf("send_reaction: message %s not found in %s", messageID, jidStr)
+		return
+	}
+	target := list[idx]
+	messagesMu.Unlock()
+
+	sender, err := reactionSenderJID(jid, target)
+	if err != nil {
+		logger.Warnf("send_reaction: %v", err)
+		return
+	}
+
+	_, err = client.SendMessage(ctx, jid, client.BuildReaction(jid, sender, messageID, emoji))
+	if err != nil {
+		logger.Warnf("send_reaction in %s failed: %v", jidStr, err)
+		emit(event{Type: "error", Message: fmt.Sprintf("failed to send reaction: %v", err)})
+		return
+	}
+
+	messagesMu.Lock()
+	list = messages[jidStr]
+	var updated chatMessage
+	found := false
+	for i, cur := range list {
+		if cur.ID == messageID {
+			cur.Reactions = applyReaction(cur.Reactions, client.Store.ID.String(), "", true, emoji)
+			list[i] = cur
+			updated = cur
+			found = true
+			break
+		}
+	}
+	if found {
+		messages[jidStr] = list
+		saveMessages(jidStr, list)
+	}
+	messagesMu.Unlock()
+
+	if found {
+		emit(event{Type: "message_update", JID: jidStr, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
+	}
+}
+
 // readCommands is the stdin half of the protocol: one JSON command per
 // line from the app. Runs for the life of the process; a closed stdin
 // (app process torn down) just ends the loop.
@@ -1370,6 +1440,10 @@ func readCommands(ctx context.Context, client *whatsmeow.Client, logger waLog.Lo
 		case "send_audio":
 			if cmd.JID != "" && cmd.AudioPath != "" {
 				go handleSendAudio(ctx, client, logger, cmd.JID, cmd.AudioPath, cmd.DurationMs, chats, messages)
+			}
+		case "send_reaction":
+			if cmd.JID != "" && cmd.MessageID != "" {
+				go handleSendReaction(ctx, client, logger, cmd.JID, cmd.MessageID, cmd.Emoji, messages)
 			}
 		default:
 			logger.Warnf("unknown command from app: %s", cmd.Type)
