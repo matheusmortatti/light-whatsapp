@@ -809,23 +809,36 @@ private fun ReactionPickerScreen(
                 .fillMaxWidth()
                 .padding(horizontal = 24.dp, vertical = 16.dp),
         )
-        Row(
+        // Laid out as two rows of 3 rather than one row of 6 — at
+        // LightTextVariant.Title size, 6 emoji in a single Row overflow the
+        // LP3's screen width (confirmed on real hardware: the last two,
+        // "😢" and "🙏", rendered entirely off-screen with no scroll
+        // available to reach them). A 3x2 grid keeps every emoji large and
+        // fully within the tappable/visible frame.
+        Column(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.Center,
         ) {
-            for (emoji in QUICK_REACTIONS) {
-                LightText(
-                    text = emoji,
-                    variant = LightTextVariant.Title,
-                    underline = emoji == currentReaction,
-                    modifier = Modifier.lightClickable {
-                        onPick(if (emoji == currentReaction) "" else emoji)
-                    },
-                )
+            for (row in QUICK_REACTIONS.chunked(3)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    for (emoji in row) {
+                        LightText(
+                            text = emoji,
+                            variant = LightTextVariant.Title,
+                            underline = emoji == currentReaction,
+                            modifier = Modifier.lightClickable {
+                                onPick(if (emoji == currentReaction) "" else emoji)
+                            },
+                        )
+                    }
+                }
             }
         }
     }
