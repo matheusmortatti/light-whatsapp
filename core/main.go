@@ -1224,6 +1224,28 @@ func handleSendMessage(ctx context.Context, client *whatsmeow.Client, logger waL
 	emit(event{Type: "message_update", JID: jidStr, Messages: resolveMentionsInList(ctx, client, []chatMessage{cm})})
 }
 
+// reactionSenderJID resolves the JID BuildMessageKey needs as its "sender"
+// argument to identify target within chat when building a reaction to it:
+// types.EmptyJID for our own message (BuildMessageKey then marks the built
+// key FromMe: true), chat itself for a 1:1 peer's message (the chat IS the
+// peer's JID there), or target.Sender for a group participant's message.
+func reactionSenderJID(chat types.JID, target chatMessage) (types.JID, error) {
+	if target.FromMe {
+		return types.EmptyJID, nil
+	}
+	if chat.Server != types.GroupServer {
+		return chat, nil
+	}
+	sender, err := types.ParseJID(target.Sender)
+	if err != nil {
+		return types.EmptyJID, fmt.Errorf("bad sender jid %q: %w", target.Sender, err)
+	}
+	if sender.User == "" {
+		return types.EmptyJID, fmt.Errorf("bad sender jid %q: no user part", target.Sender)
+	}
+	return sender, nil
+}
+
 // recordedAudioMimetype is what this app's own recordings are encoded as
 // (AAC audio in an MPEG-4 container — see app/'s VoiceRecorder). Sent as a
 // regular (non-PTT) audio attachment rather than faking an Opus/Ogg voice

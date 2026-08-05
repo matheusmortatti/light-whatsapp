@@ -186,6 +186,54 @@ func TestApplyReaction(t *testing.T) {
 	})
 }
 
+func TestReactionSenderJID(t *testing.T) {
+	t.Run("our own message resolves to EmptyJID", func(t *testing.T) {
+		chat := types.NewJID("111", types.DefaultUserServer)
+		target := chatMessage{ID: "m1", FromMe: true}
+		got, err := reactionSenderJID(chat, target)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != types.EmptyJID {
+			t.Errorf("got %v, want EmptyJID", got)
+		}
+	})
+
+	t.Run("1:1 peer's message resolves to the chat JID itself", func(t *testing.T) {
+		chat := types.NewJID("111", types.DefaultUserServer)
+		target := chatMessage{ID: "m1", FromMe: false}
+		got, err := reactionSenderJID(chat, target)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != chat {
+			t.Errorf("got %v, want chat JID %v", got, chat)
+		}
+	})
+
+	t.Run("group participant's message resolves to their JID", func(t *testing.T) {
+		chat := types.NewJID("222", types.GroupServer)
+		participant := types.NewJID("333", types.DefaultUserServer)
+		target := chatMessage{ID: "m1", FromMe: false, Sender: participant.String()}
+		got, err := reactionSenderJID(chat, target)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != participant {
+			t.Errorf("got %v, want %v", got, participant)
+		}
+	})
+
+	t.Run("group message with unparseable sender is an error", func(t *testing.T) {
+		chat := types.NewJID("222", types.GroupServer)
+		target := chatMessage{ID: "m1", FromMe: false, Sender: "not a jid"}
+		_, err := reactionSenderJID(chat, target)
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+	})
+}
+
 func TestExtractMessage(t *testing.T) {
 	t.Run("video message", func(t *testing.T) {
 		msg := &waE2E.Message{VideoMessage: &waE2E.VideoMessage{Caption: proto.String("look")}}
