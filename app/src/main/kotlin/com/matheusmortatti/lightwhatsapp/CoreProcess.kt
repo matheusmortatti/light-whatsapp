@@ -78,6 +78,9 @@ sealed class CoreEvent {
     // (a download completing, a status receipt, a new send/receive) rather
     // than the chat's whole list — see core/main.go's "message_update" event.
     data class MessageUpdate(val jid: String, val messages: List<Message>) : CoreEvent()
+    // See core/main.go's markHistorySyncActive: true while a burst of
+    // history-sync chunks is in flight, false once it's been idle for a bit.
+    data class SyncStatus(val syncing: Boolean) : CoreEvent()
 }
 
 /**
@@ -202,6 +205,7 @@ class CoreProcess(private val context: Context) {
             "chats" -> CoreEvent.Chats(parseChats(obj.optJSONArray("chats")))
             "messages" -> CoreEvent.Messages(obj.getString("jid"), parseMessages(obj.optJSONArray("messages")))
             "message_update" -> CoreEvent.MessageUpdate(obj.getString("jid"), parseMessages(obj.optJSONArray("messages")))
+            "sync_status" -> CoreEvent.SyncStatus(obj.optBoolean("syncing"))
             else -> null
         }
     } catch (e: Exception) {

@@ -117,6 +117,7 @@ private fun QrLoginScreen(viewModel: QrLoginViewModel = viewModel()) {
     val chats by viewModel.chats.collectAsState()
     val selectedChat by viewModel.selectedChat.collectAsState()
     val messages by viewModel.messages.collectAsState()
+    val syncing by viewModel.syncing.collectAsState()
 
     when {
         state !is LoginState.Connected -> LoginScreen(state = state)
@@ -127,7 +128,7 @@ private fun QrLoginScreen(viewModel: QrLoginViewModel = viewModel()) {
             onSend = viewModel::sendMessage,
             onSendAudio = viewModel::sendAudio,
         )
-        else -> ChatListScreen(chats = chats, onChatClick = viewModel::openChat)
+        else -> ChatListScreen(chats = chats, syncing = syncing, onChatClick = viewModel::openChat)
     }
 }
 
@@ -179,7 +180,7 @@ private fun LoginScreen(state: LoginState) {
 }
 
 @Composable
-private fun ChatListScreen(chats: List<Chat>, onChatClick: (Chat) -> Unit) {
+private fun ChatListScreen(chats: List<Chat>, syncing: Boolean, onChatClick: (Chat) -> Unit) {
     // Fullscreen text entry (searching) vs. an applied filter (query) are
     // tracked separately, same split as ChatDetailScreen's composing flow:
     // the keyboard editor closes on submit, but the filter it produced stays
@@ -220,6 +221,15 @@ private fun ChatListScreen(chats: List<Chat>, onChatClick: (Chat) -> Unit) {
             .background(LightThemeTokens.colors.background),
     ) {
         LightTopBar(
+            leftButton = if (syncing) {
+                LightBarButton.LightIcon(
+                    icon = LightIcons.REFRESH,
+                    onClick = null,
+                    contentDescription = "Updating chats",
+                )
+            } else {
+                null
+            },
             center = LightTopBarCenter.Text("WhatsApp"),
             rightButton = if (query.isNotBlank()) {
                 LightBarButton.LightIcon(icon = LightIcons.CLOSE, onClick = { query = "" })

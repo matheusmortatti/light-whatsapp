@@ -49,6 +49,11 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages.asStateFlow()
 
+    // Whether core is currently in the middle of a history-sync burst — see
+    // CoreEvent.SyncStatus. Drives the chat list's small "updating" icon.
+    private val _syncing = MutableStateFlow(false)
+    val syncing: StateFlow<Boolean> = _syncing.asStateFlow()
+
     init {
         viewModelScope.launch {
             coreProcess.events().collect { event ->
@@ -60,6 +65,7 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
                         _chats.value = emptyList()
                         _selectedChat.value = null
                         _messages.value = emptyList()
+                        _syncing.value = false
                     }
                     is CoreEvent.Error -> _state.value = LoginState.Error(event.message)
                     is CoreEvent.Chats -> _chats.value = event.chats
@@ -73,6 +79,7 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
                             _messages.value = mergeMessages(_messages.value, event.messages)
                         }
                     }
+                    is CoreEvent.SyncStatus -> _syncing.value = event.syncing
                 }
             }
         }

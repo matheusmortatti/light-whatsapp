@@ -63,7 +63,7 @@ func init() {
 // event is one line of the stdout protocol. Exactly one of the fields
 // relevant to Type is populated.
 type event struct {
-	Type string `json:"type"` // "qr" | "connected" | "logged_out" | "error" | "chats" | "messages" | "message_update"
+	Type string `json:"type"` // "qr" | "connected" | "logged_out" | "error" | "chats" | "messages" | "message_update" | "sync_status"
 	Code string `json:"code,omitempty"`
 	JID  string `json:"jid,omitempty"`
 	// "messages" carries the chat's full list (open_chat replies only).
@@ -74,6 +74,10 @@ type event struct {
 	Message  string        `json:"message,omitempty"`
 	Chats    []chatSummary `json:"chats,omitempty"`
 	Messages []chatMessage `json:"messages,omitempty"`
+	// "sync_status" reports whether a burst of history-sync chunks is
+	// currently in flight — see markHistorySyncActive. Absent (false)
+	// covers the common case, so it's omitempty like everything else here.
+	Syncing bool `json:"syncing,omitempty"`
 }
 
 // command is one line of the stdin protocol: the app asking core for
@@ -229,6 +233,45 @@ func isOpenChatJID(jid string) bool {
 	openChatMu.Lock()
 	defer openChatMu.Unlock()
 	return openChatJID == jid
+}
+
+// syncMu guards syncing and syncTimer for the "sync_status" event: history-
+// sync chunks arrive in a burst (bootstrap, recent, push-name, ...) with
+// gaps between them, so rather than toggling the app's indicator on every
+// single chunk, syncing flips true on the first chunk of a burst and a
+// debounce timer flips it back false historySyncIdleDelay after the last
+// one — smoothing over the gaps instead of flickering.
+var (
+	syncMu    sync.Mutex
+	syncing   bool
+	syncTimer *time.Timer
+)
+
+const historySyncIdleDelay = 2 * time.Second
+
+// markHistorySyncActive is called on every history-sync chunk, including
+// ones with no conversations (push-name/non-blocking-data chunks still
+// count as sync activity for the app's indicator).
+func markHistorySyncActive() {
+	syncMu.Lock()
+	defer syncMu.Unlock()
+	if !syncing {
+		syncing = true
+		emit(event{Type: "sync_status", Syncing: true})
+	}
+	if syncTimer != nil {
+		syncTimer.Stop()
+	}
+	syncTimer = time.AfterFunc(historySyncIdleDelay, markHistorySyncIdle)
+}
+
+func markHistorySyncIdle() {
+	syncMu.Lock()
+	defer syncMu.Unlock()
+	if syncing {
+		syncing = false
+		emit(event{Type: "sync_status", Syncing: false})
+	}
 }
 
 func emit(e event) {
@@ -1430,6 +1473,8 @@ func sanitizeMessageCache(ctx context.Context, client *whatsmeow.Client) {
 // (bootstrap, recent, push-name, ...) so this is called once per chunk and
 // just re-emits the accumulated total each time.
 func handleHistorySync(ctx context.Context, client *whatsmeow.Client, hs *events.HistorySync, chats map[string]chatSummary, messages map[string][]chatMessage) {
+	markHistorySyncActive()
+
 	convs := hs.Data.GetConversations()
 	if len(convs) == 0 {
 		return

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -9,6 +12,56 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
+
+// TestHistorySyncActivity verifies the sync_status debounce: a burst of
+// history-sync chunks (markHistorySyncActive, possibly several) emits
+// "syncing":true just once at the start, and going idle (markHistorySyncIdle,
+// normally fired by the debounce timer — called directly here to avoid a
+// real sleep) emits it again with syncing omitted (i.e. false).
+func TestHistorySyncActivity(t *testing.T) {
+	syncMu.Lock()
+	syncing = false
+	if syncTimer != nil {
+		syncTimer.Stop()
+		syncTimer = nil
+	}
+	syncMu.Unlock()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+
+	markHistorySyncActive()
+	markHistorySyncActive() // second chunk of the same burst shouldn't re-emit
+	markHistorySyncIdle()
+
+	syncMu.Lock()
+	if syncTimer != nil {
+		syncTimer.Stop()
+	}
+	syncMu.Unlock()
+
+	os.Stdout = origStdout
+	w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d emitted lines, want 2: %q", len(lines), out)
+	}
+	if !strings.Contains(lines[0], `"type":"sync_status"`) || !strings.Contains(lines[0], `"syncing":true`) {
+		t.Errorf("first emit = %q, want sync_status syncing:true", lines[0])
+	}
+	if !strings.Contains(lines[1], `"type":"sync_status"`) || strings.Contains(lines[1], `"syncing"`) {
+		t.Errorf("second emit = %q, want sync_status with syncing omitted (false)", lines[1])
+	}
+}
 
 func TestReceiptStatusFor(t *testing.T) {
 	tests := []struct {
