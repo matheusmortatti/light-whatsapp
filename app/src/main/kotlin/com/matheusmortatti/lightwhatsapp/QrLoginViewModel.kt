@@ -115,6 +115,15 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
         coreProcess.sendAudio(jid, audioPath, durationMs)
     }
 
+    /**
+     * Reacts to messageId in the currently open chat with emoji ("" removes
+     * a previously-sent reaction). A no-op if no chat is open.
+     */
+    fun sendReaction(messageId: String, emoji: String) {
+        val jid = _selectedChat.value?.jid ?: return
+        coreProcess.sendReaction(jid, messageId, emoji)
+    }
+
     // Applies a message_update's delta onto the currently held list: existing
     // IDs are replaced in place (so Compose's key-based diffing only
     // invalidates that one row), unknown IDs are new messages and get

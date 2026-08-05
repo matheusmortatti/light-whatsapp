@@ -53,9 +53,8 @@ data class Message(
     // never reach here — core/main.go treats them as unsupported.
     val stickerPath: String?,
     val stickerIsAnimated: Boolean,
-    // Reactions on this message, received live — see core/main.go's
-    // chatMessage.Reactions. Always empty for a message this app sends,
-    // since sending a reaction isn't supported.
+    // Reactions on this message — see core/main.go's chatMessage.Reactions.
+    // Populated whether the message is ours or theirs.
     val reactions: List<Reaction>,
 )
 
@@ -179,6 +178,22 @@ class CoreProcess(private val context: Context) {
                 .put("jid", jid)
                 .put("audio_path", audioPath)
                 .put("duration_ms", durationMs),
+        )
+    }
+
+    /**
+     * Sends a "send_reaction" command to core's stdin, asking it to react
+     * to an existing message — see core/main.go's
+     * readCommands/handleSendReaction. [emoji] == "" removes a previously-
+     * sent reaction. A no-op if the subprocess isn't running.
+     */
+    fun sendReaction(jid: String, messageId: String, emoji: String) {
+        writeCommand(
+            JSONObject()
+                .put("type", "send_reaction")
+                .put("jid", jid)
+                .put("message_id", messageId)
+                .put("emoji", emoji),
         )
     }
 
