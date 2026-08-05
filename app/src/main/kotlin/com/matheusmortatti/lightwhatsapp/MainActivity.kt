@@ -127,6 +127,7 @@ private fun QrLoginScreen(viewModel: QrLoginViewModel = viewModel()) {
             onBack = viewModel::closeChat,
             onSend = viewModel::sendMessage,
             onSendAudio = viewModel::sendAudio,
+            onSendReaction = viewModel::sendReaction,
         )
         else -> ChatListScreen(chats = chats, syncing = syncing, onChatClick = viewModel::openChat)
     }
@@ -321,6 +322,7 @@ private fun ChatDetailScreen(
     onBack: () -> Unit,
     onSend: (String) -> Unit,
     onSendAudio: (String, Long) -> Unit,
+    onSendReaction: (String, String) -> Unit,
 ) {
     val context = LocalContext.current
 
@@ -341,6 +343,11 @@ private fun ChatDetailScreen(
     // rememberSaveable — re-opening from the thumbnail on process restart
     // is cheap and there's no live player state worth restoring.
     var playingVideo by remember(chat.jid) { mutableStateOf<Pair<String, Boolean>?>(null) }
+
+    // The message whose reaction picker is currently open, or null. Not
+    // rememberSaveable — same reasoning as playingVideo, re-opening it is
+    // one tap away and there's no meaningful state to restore.
+    var reactingTo by remember(chat.jid) { mutableStateOf<Message?>(null) }
 
     fun beginRecording() {
         val file = File(context.filesDir, "voice_tmp/${UUID.randomUUID()}.m4a")
@@ -364,6 +371,7 @@ private fun ChatDetailScreen(
 
     BackHandler(onBack = {
         when {
+            reactingTo != null -> reactingTo = null
             playingVideo != null -> playingVideo = null
             composing -> composing = false
             recording -> cancelRecording()
@@ -470,6 +478,19 @@ private fun ChatDetailScreen(
         return
     }
 
+    reactingTo?.let { target ->
+        ReactionPickerScreen(
+            message = target,
+            chatName = chat.name,
+            onPick = { emoji ->
+                onSendReaction(target.id, emoji)
+                reactingTo = null
+            },
+            onClose = { reactingTo = null },
+        )
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -539,6 +560,7 @@ private fun ChatDetailScreen(
                             showHeader = showHeader || showStatus,
                             showStatus = showStatus,
                             onPlayVideo = { path, loop -> playingVideo = path to loop },
+                            onReact = { reactingTo = it },
                             modifier = Modifier.padding(
                                 start = 24.dp,
                                 end = 24.dp,
@@ -742,6 +764,73 @@ private fun VideoPlayerScreen(
     }
 }
 
+// WhatsApp's own standard quick-reaction set — see
+// docs/superpowers/specs/2026-08-05-send-reactions-design.md for why this
+// is the agreed breadth rather than a larger or fully open picker.
+private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+
+// A one-line summary of message shown atop the reaction picker, reusing the
+// same placeholder labels MessageRow renders for a not-yet-downloaded or
+// non-text message.
+private fun messagePreviewText(message: Message): String = when (message.type) {
+    "image" -> message.text.ifBlank { "[Photo]" }
+    "sticker" -> "[Sticker]"
+    "video" -> message.text.ifBlank { "[Video]" }
+    "gif" -> message.text.ifBlank { "[GIF]" }
+    "audio" -> "[Voice message]"
+    "unsupported" -> "[Unsupported message]"
+    else -> message.text
+}
+
+@Composable
+private fun ReactionPickerScreen(
+    message: Message,
+    chatName: String,
+    onPick: (emoji: String) -> Unit,
+    onClose: () -> Unit,
+) {
+    val currentReaction = message.reactions.firstOrNull { it.fromMe }?.emoji
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(LightThemeTokens.colors.background),
+    ) {
+        LightTopBar(
+            leftButton = LightBarButton.LightIcon(icon = LightIcons.CLOSE, onClick = onClose),
+            center = LightTopBarCenter.Text(chatName),
+        )
+        LightText(
+            text = messagePreviewText(message),
+            variant = LightTextVariant.Copy,
+            lighten = true,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 16.dp),
+        )
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            for (emoji in QUICK_REACTIONS) {
+                LightText(
+                    text = emoji,
+                    variant = LightTextVariant.Title,
+                    underline = emoji == currentReaction,
+                    modifier = Modifier.lightClickable {
+                        onPick(if (emoji == currentReaction) "" else emoji)
+                    },
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun MessageRow(
     message: Message,
@@ -750,11 +839,14 @@ private fun MessageRow(
     showHeader: Boolean,
     showStatus: Boolean,
     onPlayVideo: (path: String, loop: Boolean) -> Unit,
+    onReact: (Message) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val bodyAlign = if (message.fromMe) TextAlign.End else TextAlign.Start
     Column(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .lightClickable { onReact(message) },
         horizontalAlignment = if (message.fromMe) Alignment.End else Alignment.Start,
     ) {
         // Header (sender + time) is skipped for messages clustered with the
