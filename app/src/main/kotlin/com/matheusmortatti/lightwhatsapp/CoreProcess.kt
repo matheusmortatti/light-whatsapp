@@ -53,6 +53,18 @@ data class Message(
     // never reach here — core/main.go treats them as unsupported.
     val stickerPath: String?,
     val stickerIsAnimated: Boolean,
+    // Reactions on this message, received live — see core/main.go's
+    // chatMessage.Reactions. Always empty for a message this app sends,
+    // since sending a reaction isn't supported.
+    val reactions: List<Reaction>,
+)
+
+// One person's current reaction to a message — see core/main.go's chatReaction.
+data class Reaction(
+    val sender: String,
+    val senderName: String?,
+    val fromMe: Boolean,
+    val emoji: String,
 )
 
 sealed class CoreEvent {
@@ -231,6 +243,20 @@ class CoreProcess(private val context: Context) {
                 isGif = o.optBoolean("is_gif", false),
                 stickerPath = o.optString("sticker_path").ifBlank { null },
                 stickerIsAnimated = o.optBoolean("sticker_is_animated", false),
+                reactions = parseReactions(o.optJSONArray("reactions")),
+            )
+        }
+    }
+
+    private fun parseReactions(array: JSONArray?): List<Reaction> {
+        if (array == null) return emptyList()
+        return (0 until array.length()).map { i ->
+            val o = array.getJSONObject(i)
+            Reaction(
+                sender = o.getString("sender"),
+                senderName = o.optString("sender_name").ifBlank { null },
+                fromMe = o.optBoolean("from_me", false),
+                emoji = o.optString("emoji"),
             )
         }
     }

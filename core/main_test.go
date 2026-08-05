@@ -89,6 +89,50 @@ func TestApplyMessageStatus(t *testing.T) {
 	})
 }
 
+func TestApplyReaction(t *testing.T) {
+	t.Run("adds a new reaction", func(t *testing.T) {
+		got := applyReaction(nil, "a@s.whatsapp.net", "", false, "👍")
+		if len(got) != 1 || got[0].Sender != "a@s.whatsapp.net" || got[0].Emoji != "👍" {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("same sender reacting again replaces their emoji, doesn't add a second entry", func(t *testing.T) {
+		list := []chatReaction{{Sender: "a@s.whatsapp.net", Emoji: "👍"}}
+		got := applyReaction(list, "a@s.whatsapp.net", "", false, "❤️")
+		if len(got) != 1 || got[0].Emoji != "❤️" {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("blank emoji removes the sender's existing reaction", func(t *testing.T) {
+		list := []chatReaction{
+			{Sender: "a@s.whatsapp.net", Emoji: "👍"},
+			{Sender: "b@s.whatsapp.net", Emoji: "❤️"},
+		}
+		got := applyReaction(list, "a@s.whatsapp.net", "", false, "")
+		if len(got) != 1 || got[0].Sender != "b@s.whatsapp.net" {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("blank emoji for a sender with no existing reaction is a no-op", func(t *testing.T) {
+		list := []chatReaction{{Sender: "a@s.whatsapp.net", Emoji: "👍"}}
+		got := applyReaction(list, "b@s.whatsapp.net", "", false, "")
+		if len(got) != 1 || got[0].Sender != "a@s.whatsapp.net" {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("multiple senders can each have their own reaction", func(t *testing.T) {
+		list := applyReaction(nil, "a@s.whatsapp.net", "", false, "👍")
+		list = applyReaction(list, "b@s.whatsapp.net", "Bee", false, "❤️")
+		if len(list) != 2 {
+			t.Fatalf("got %+v", list)
+		}
+	})
+}
+
 func TestExtractMessage(t *testing.T) {
 	t.Run("video message", func(t *testing.T) {
 		msg := &waE2E.Message{VideoMessage: &waE2E.VideoMessage{Caption: proto.String("look")}}

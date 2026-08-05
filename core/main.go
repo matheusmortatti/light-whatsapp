@@ -91,9 +91,9 @@ type command struct {
 }
 
 // chatMessage is one message within a chat, as sent to the app. Only text,
-// image, and audio messages are represented — everything else (video,
-// documents, stickers, polls, reactions, ...) is dropped during extraction,
-// per the app's scope.
+// image, and audio messages are represented — everything else (documents,
+// polls, ...) is dropped during extraction, per the app's scope. Reactions
+// aren't their own chatMessage — see Reactions and handleReaction.
 type chatMessage struct {
 	ID        string `json:"id"`
 	Timestamp int64  `json:"timestamp"`
@@ -154,6 +154,22 @@ type chatMessage struct {
 	StickerFileSHA256    []byte `json:"sticker_file_sha256,omitempty"`
 	StickerFileEncSHA256 []byte `json:"sticker_file_enc_sha256,omitempty"`
 	StickerMimetype      string `json:"sticker_mimetype,omitempty"`
+
+	// Reactions on this message, received live (see handleReaction) — never
+	// set for a message this app sends, since sending a reaction isn't
+	// supported.
+	Reactions []chatReaction `json:"reactions,omitempty"`
+}
+
+// chatReaction is one person's current reaction to a message, keyed by
+// Sender so a later reaction from the same person replaces (or, with Emoji
+// == "", removes) their earlier one — WhatsApp allows exactly one active
+// reaction per person per message.
+type chatReaction struct {
+	Sender     string `json:"sender"`
+	SenderName string `json:"sender_name,omitempty"` // best-effort display name, group chats only
+	FromMe     bool   `json:"from_me,omitempty"`
+	Emoji      string `json:"emoji"`
 }
 
 // chatSummary is one entry of a "chats" event: a single conversation as
@@ -1491,6 +1507,16 @@ func handleHistorySync(ctx context.Context, client *whatsmeow.Client, hs *events
 // right away — unlike history-sync backlog, live messages arrive one at a
 // time so eager downloading is cheap.
 func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, evt *events.Message, chats map[string]chatSummary, messages map[string][]chatMessage) {
+	// A reaction arrives as its own *events.Message (Message.ReactionMessage
+	// set, everything else nil) rather than an edit to the target message —
+	// handle it separately and don't fall through to the rest of this
+	// function, which would otherwise treat it as a new (unsupported)
+	// message and bump the chat/unread count for it.
+	if evt.Message.GetReactionMessage() != nil {
+		handleReaction(ctx, client, evt, messages)
+		return
+	}
+
 	jid := evt.Info.Chat
 	if jid.Server == types.BroadcastServer || isJunkChatJID(jid) {
 		return
@@ -1593,6 +1619,81 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	if msgType == "sticker" && sticker != nil {
 		go downloadSticker(ctx, client, logger, messages, jid.String(), cm)
 	}
+}
+
+// handleReaction updates the Reactions of whichever cached message
+// evt.Message.ReactionMessage.Key.ID names, for a *events.Message that
+// carries a reaction instead of ordinary content (see handleMessage). A
+// blank target ID, a chat this app ignores (broadcast/junk), or a target
+// message not currently cached (older than maxMessagesPerChat, or in a chat
+// never opened) are all silent no-ops — the same way an unmatched receipt
+// is in applyMessageStatus.
+func handleReaction(ctx context.Context, client *whatsmeow.Client, evt *events.Message, messages map[string][]chatMessage) {
+	r := evt.Message.GetReactionMessage()
+	targetID := r.GetKey().GetID()
+	if targetID == "" {
+		return
+	}
+	jid := canonicalizeChatJID(ctx, client, evt.Info.Chat)
+	if jid.Server == types.BroadcastServer || isJunkChatJID(jid) {
+		return
+	}
+	jidStr := jid.String()
+
+	senderName := ""
+	if evt.Info.IsGroup && !evt.Info.IsFromMe {
+		senderName = evt.Info.PushName
+	}
+
+	messagesMu.Lock()
+	list, ok := messages[jidStr]
+	var updated chatMessage
+	found := false
+	if ok {
+		for i, cur := range list {
+			if cur.ID == targetID {
+				cur.Reactions = applyReaction(cur.Reactions, evt.Info.Sender.String(), senderName, evt.Info.IsFromMe, r.GetText())
+				list[i] = cur
+				updated = cur
+				found = true
+				break
+			}
+		}
+		if found {
+			messages[jidStr] = list
+			saveMessages(jidStr, list)
+		}
+	}
+	messagesMu.Unlock()
+
+	if found {
+		emit(event{Type: "message_update", JID: jidStr, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
+	}
+}
+
+// applyReaction upserts sender's reaction into reactions: emoji == "" (see
+// whatsmeow.RemoveReactionText) removes sender's existing entry if any,
+// otherwise sender's entry is added or replaced with emoji.
+func applyReaction(reactions []chatReaction, sender, senderName string, fromMe bool, emoji string) []chatReaction {
+	idx := -1
+	for i, r := range reactions {
+		if r.Sender == sender {
+			idx = i
+			break
+		}
+	}
+	if emoji == "" {
+		if idx == -1 {
+			return reactions
+		}
+		return append(reactions[:idx], reactions[idx+1:]...)
+	}
+	entry := chatReaction{Sender: sender, SenderName: senderName, FromMe: fromMe, Emoji: emoji}
+	if idx == -1 {
+		return append(reactions, entry)
+	}
+	reactions[idx] = entry
+	return reactions
 }
 
 // contactName looks up the best display name whatsmeow's contact store has

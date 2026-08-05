@@ -864,8 +864,20 @@ private fun MessageRow(
 
             else -> MessageBodyText(text = message.text, align = bodyAlign)
         }
+
+        if (message.reactions.isNotEmpty()) {
+            ChatMetaText(text = formatReactions(message.reactions))
+        }
     }
 }
+
+// Groups reactions by emoji (WhatsApp allows several people to react with
+// the same one) and joins them, e.g. "👍 ❤️×2" — who reacted isn't shown,
+// matching how WhatsApp itself only reveals that on long-press.
+private fun formatReactions(reactions: List<Reaction>): String =
+    reactions.groupingBy { it.emoji }.eachCount().entries.joinToString(" ") { (emoji, count) ->
+        if (count > 1) "$emoji×$count" else emoji
+    }
 
 // Copy's own line-height (fontSize * 1.5, see LightTheme.kt) is tuned for
 // short standalone lines, not paragraphs — at that ratio, the gap between
