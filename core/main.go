@@ -426,6 +426,11 @@ func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMes
 			m = m.GetViewOnceMessage().GetMessage()
 		case m.GetViewOnceMessageV2() != nil:
 			m = m.GetViewOnceMessageV2().GetMessage()
+		case m.GetProtocolMessage() != nil:
+			// Internal plumbing (history-sync notifications, app-state key
+			// distribution, ephemeral-setting changes, revokes, ...), never
+			// user-authored content. Drop instead of showing as unsupported.
+			return "", "", nil, nil, nil, nil, false
 		default:
 			return unsupportedMessageLabel(m), "unsupported", nil, nil, nil, nil, true
 		}
