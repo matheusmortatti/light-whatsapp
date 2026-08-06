@@ -1,15 +1,21 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"strings"
 	"testing"
 
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -61,6 +67,82 @@ func TestHistorySyncActivity(t *testing.T) {
 	if !strings.Contains(lines[1], `"type":"sync_status"`) || strings.Contains(lines[1], `"syncing"`) {
 		t.Errorf("second emit = %q, want sync_status with syncing omitted (false)", lines[1])
 	}
+}
+
+// TestHistorySyncConversationTimestamp guards against a real ordering bug
+// seen after a relink: WhatsApp's post-relink sync stamped conversationTimestamp
+// for many chats it wasn't sending full detail for to the same shared
+// sync-boundary value — up to 90 minutes newer than some of those chats'
+// actual last message — which used to win over both the cached (correct)
+// timestamp and the real per-message data in the same chunk, scrambling
+// the chat list's most-recent-first order.
+func TestHistorySyncConversationTimestamp(t *testing.T) {
+	t.Chdir(t.TempDir())
+	client := whatsmeow.NewClient(&store.Device{}, waLog.Noop)
+	ctx := context.Background()
+
+	newHistoryMsg := func(msgID string, ts int64) *waHistorySync.HistorySyncMsg {
+		return &waHistorySync.HistorySyncMsg{
+			Message: &waWeb.WebMessageInfo{
+				Key:              &waCommon.MessageKey{ID: proto.String(msgID), FromMe: proto.Bool(true)},
+				MessageTimestamp: proto.Uint64(uint64(ts)),
+				Message:          &waE2E.Message{Conversation: proto.String("hi")},
+			},
+		}
+	}
+
+	t.Run("bogus conversation-level timestamp does not override a cached one with no corroborating message", func(t *testing.T) {
+		chats := map[string]chatSummary{
+			"111@s.whatsapp.net": {JID: "111@s.whatsapp.net", Name: "Old Chat", Timestamp: 1000},
+		}
+		messages := make(map[string][]chatMessage)
+		hs := &events.HistorySync{Data: &waHistorySync.HistorySync{
+			Conversations: []*waHistorySync.Conversation{{
+				ID:                    proto.String("111@s.whatsapp.net"),
+				Name:                  proto.String("Old Chat"),
+				ConversationTimestamp: proto.Uint64(9999), // sync-boundary stub, no real messages back it
+			}},
+		}}
+		handleHistorySync(ctx, client, hs, chats, messages)
+		if got := chats["111@s.whatsapp.net"].Timestamp; got != 1000 {
+			t.Errorf("got timestamp %d, want cached 1000 preserved (not bogus 9999)", got)
+		}
+	})
+
+	t.Run("real per-message timestamp in the same chunk still updates a cached one", func(t *testing.T) {
+		chats := map[string]chatSummary{
+			"222@s.whatsapp.net": {JID: "222@s.whatsapp.net", Name: "Active Chat", Timestamp: 1000},
+		}
+		messages := make(map[string][]chatMessage)
+		hs := &events.HistorySync{Data: &waHistorySync.HistorySync{
+			Conversations: []*waHistorySync.Conversation{{
+				ID:                    proto.String("222@s.whatsapp.net"),
+				Name:                  proto.String("Active Chat"),
+				ConversationTimestamp: proto.Uint64(9999), // still bogus/higher
+				Messages:              []*waHistorySync.HistorySyncMsg{newHistoryMsg("m1", 2000)},
+			}},
+		}}
+		handleHistorySync(ctx, client, hs, chats, messages)
+		if got := chats["222@s.whatsapp.net"].Timestamp; got != 2000 {
+			t.Errorf("got timestamp %d, want real message timestamp 2000 (not bogus 9999, not stale 1000)", got)
+		}
+	})
+
+	t.Run("a chat never seen before falls back to the conversation-level timestamp", func(t *testing.T) {
+		chats := map[string]chatSummary{}
+		messages := make(map[string][]chatMessage)
+		hs := &events.HistorySync{Data: &waHistorySync.HistorySync{
+			Conversations: []*waHistorySync.Conversation{{
+				ID:                    proto.String("333@s.whatsapp.net"),
+				Name:                  proto.String("New Chat"),
+				ConversationTimestamp: proto.Uint64(9999),
+			}},
+		}}
+		handleHistorySync(ctx, client, hs, chats, messages)
+		if got := chats["333@s.whatsapp.net"].Timestamp; got != 9999 {
+			t.Errorf("got timestamp %d, want 9999 (nothing better known for a brand-new chat)", got)
+		}
+	})
 }
 
 func TestReceiptStatusFor(t *testing.T) {
@@ -230,6 +312,39 @@ func TestReactionSenderJID(t *testing.T) {
 		_, err := reactionSenderJID(chat, target)
 		if err == nil {
 			t.Fatal("expected an error, got nil")
+		}
+	})
+}
+
+// TestCanonicalizeChatJIDBeforePairing guards against a real crash: a
+// *store.Device fresh out of whatsmeow's Container.NewDevice() (no
+// whatsapp.db row yet — first run, or a relink where whatsapp.db was
+// cleared but chats.json survived) has nil Contacts/LIDs sub-stores until
+// Save() runs post-pairing. canonicalizeChatJID must not touch them while
+// client.Store.ID is nil, for any JID shape that would otherwise reach
+// that lookup.
+func TestCanonicalizeChatJIDBeforePairing(t *testing.T) {
+	client := whatsmeow.NewClient(&store.Device{}, waLog.Noop)
+	ctx := context.Background()
+
+	t.Run("phone-number JID passes through unchanged", func(t *testing.T) {
+		jid := types.NewJID("111", types.DefaultUserServer)
+		if got := canonicalizeChatJID(ctx, client, jid); got != jid {
+			t.Errorf("got %v, want unchanged %v", got, jid)
+		}
+	})
+
+	t.Run("lid JID passes through unchanged instead of panicking", func(t *testing.T) {
+		jid := types.NewJID("222", types.HiddenUserServer)
+		if got := canonicalizeChatJID(ctx, client, jid); got != jid {
+			t.Errorf("got %v, want unchanged %v", got, jid)
+		}
+	})
+
+	t.Run("group JID passes through unchanged", func(t *testing.T) {
+		jid := types.NewJID("333", types.GroupServer)
+		if got := canonicalizeChatJID(ctx, client, jid); got != jid {
+			t.Errorf("got %v, want unchanged %v", got, jid)
 		}
 	})
 }

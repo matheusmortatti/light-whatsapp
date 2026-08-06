@@ -1476,6 +1476,14 @@ func canonicalizeChatJID(ctx context.Context, client *whatsmeow.Client, jid type
 	if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer {
 		return jid
 	}
+	// Before pairing, client.Store came from container.NewDevice() rather
+	// than a scanned row — its Contacts/LIDs sub-stores are nil until Save()
+	// runs post-pairing (see whatsmeow's Container.NewDevice), so anything
+	// touching them here would panic. Nothing needs canonicalizing yet
+	// anyway: there's no synced LID/PN mapping without a session.
+	if client.Store.ID == nil {
+		return jid
+	}
 
 	ownID := client.Store.GetJID().ToNonAD()
 	ownLID := client.Store.GetLID().ToNonAD()
@@ -1604,24 +1612,35 @@ func handleHistorySync(ctx context.Context, client *whatsmeow.Client, hs *events
 			name = jid.User
 		}
 
-		// Conversation-level timestamps are frequently left unset in later
-		// sync chunks — fall back to the newest per-message timestamp
-		// bundled in this entry, then to whatever was already known, and
-		// keep the max across all of that (chunks can arrive in either
-		// order).
-		timestamp := int64(conv.GetConversationTimestamp())
-		if timestamp == 0 {
-			timestamp = int64(conv.GetLastMsgTimestamp())
-		}
+		// conversationTimestamp/lastMsgTimestamp are unreliable for chats
+		// this sync isn't sending full detail for (seen after a relink with
+		// a preserved local chats.json cache: many long-inactive chats came
+		// back with those fields all stamped to the same value — the sync's
+		// own boundary, not each chat's real last activity — up to 90
+		// minutes newer than that chat's actual newest cached message).
+		// Actual per-message timestamps bundled in this chunk are ground
+		// truth and take priority; the conversation-level fields are only
+		// trusted as a fallback when there's no better signal at all (a
+		// chat we've genuinely never seen before, so anything WhatsApp
+		// reports beats nothing).
+		timestamp := existing.Timestamp
+		var messageTimestampMax int64
 		for _, hm := range conv.GetMessages() {
 			info := hm.GetMessage()
-			if ts := int64(info.GetMessageTimestamp()); ts > timestamp {
-				timestamp = ts
+			if ts := int64(info.GetMessageTimestamp()); ts > messageTimestampMax {
+				messageTimestampMax = ts
 			}
 			extractHistoryMessage(ctx, client, jid, info, messages)
 		}
-		if hadExisting && existing.Timestamp > timestamp {
-			timestamp = existing.Timestamp
+		if messageTimestampMax > timestamp {
+			timestamp = messageTimestampMax
+		} else if !hadExisting {
+			if ts := int64(conv.GetConversationTimestamp()); ts > timestamp {
+				timestamp = ts
+			}
+			if ts := int64(conv.GetLastMsgTimestamp()); ts > timestamp {
+				timestamp = ts
+			}
 		}
 
 		unread := existing.UnreadCount
@@ -2007,7 +2026,13 @@ func main() {
 	// number forever once written to disk with no live event to correct
 	// it. The contact store is local (no network needed), so re-resolve
 	// every cached 1:1 chat's name against it before the first emit.
-	if len(chats) > 0 {
+	//
+	// Guarded on an existing session: a device store fresh out of
+	// container.NewDevice() (no whatsapp.db row yet — first run, or a
+	// relink after whatsapp.db was cleared but chats.json survived) has nil
+	// Contacts/LIDs sub-stores until Save() runs post-pairing, so touching
+	// them here would panic before ever reaching the QR code below.
+	if len(chats) > 0 && client.Store.ID != nil {
 		reconcileContactNames(ctx, client, chats)
 		emit(event{Type: "chats", Chats: saveChats(chats)})
 	}
