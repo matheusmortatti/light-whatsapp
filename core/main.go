@@ -1793,7 +1793,7 @@ func handleReaction(ctx context.Context, client *whatsmeow.Client, evt *events.M
 	if ok {
 		for i, cur := range list {
 			if cur.ID == targetID {
-				cur.Reactions = applyReaction(cur.Reactions, evt.Info.Sender.String(), senderName, evt.Info.IsFromMe, r.GetText())
+				cur.Reactions = applyReaction(cur.Reactions, evt.Info.Sender.ToNonAD().String(), senderName, evt.Info.IsFromMe, r.GetText())
 				list[i] = cur
 				updated = cur
 				found = true
