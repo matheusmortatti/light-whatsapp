@@ -3,7 +3,10 @@ package com.matheusmortatti.lightwhatsapp
 import android.content.Context
 import android.media.MediaRecorder
 import android.os.SystemClock
+import android.util.Log
 import java.io.File
+
+private const val TAG = "VoiceRecorder"
 
 // Self-contained recorder — sdk:client has an equivalent (LightAudioRecorder)
 // but its constructor is internal to that module and app/ deliberately has
@@ -64,7 +67,8 @@ class VoiceRecorder(private val context: Context) {
             outputFile = null
             startedAtMs = 0L
             file?.let { it to durationMs }
-        } catch (_: RuntimeException) {
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "recorder.stop() rejected the recording, discarding", e)
             file?.delete()
             outputFile = null
             startedAtMs = 0L

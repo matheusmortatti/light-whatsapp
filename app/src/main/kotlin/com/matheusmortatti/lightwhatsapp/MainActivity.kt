@@ -459,6 +459,11 @@ private fun ChatDetailScreen(
             elapsedMs = elapsedMs,
             onCancel = { cancelRecording() },
             onSend = {
+                // Known gap: when stop() rejects the recording (see
+                // VoiceRecorder's Log.w) this screen just closes with no
+                // message sent and no user-facing error — logged now, but
+                // still indistinguishable from a normal cancel to the user.
+                // Found via on-device testing 2026-08-06; not fixed.
                 val result = voiceRecorder.stop()
                 recording = false
                 if (result != null) {
