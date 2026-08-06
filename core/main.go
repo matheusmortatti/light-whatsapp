@@ -340,6 +340,14 @@ func messagesFilePath(jid string) string {
 	return filepath.Join(messagesDir, jid+".json")
 }
 
+// staleUnsupportedLabels are unsupportedMessageLabel outputs that older
+// builds saved to messages/*.json before extractMessage gave these message
+// kinds their own dedicated handling: protocol messages (dropped outright)
+// and reactions (routed to handleReaction instead, see handleMessage). Once
+// cached with msgType "unsupported", they'd otherwise show "Unsupported
+// message: protocol/reaction" forever — loadCachedMessages filters them out.
+var staleUnsupportedLabels = map[string]bool{"protocol": true, "reaction": true}
+
 func loadCachedMessages(jid string) []chatMessage {
 	data, err := os.ReadFile(messagesFilePath(jid))
 	if err != nil {
@@ -349,7 +357,14 @@ func loadCachedMessages(jid string) []chatMessage {
 	if err := json.Unmarshal(data, &list); err != nil {
 		return nil
 	}
-	return list
+	filtered := list[:0]
+	for _, m := range list {
+		if m.Type == "unsupported" && staleUnsupportedLabels[m.Text] {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	return filtered
 }
 
 func saveMessages(jid string, list []chatMessage) {
@@ -776,6 +791,13 @@ func downloadMedia(
 		logger.Warnf("failed to create %s file %s/%s: %v", kind, jid, m.ID, err)
 		return
 	}
+	// Known gap: a permanent failure (e.g. an expired media URL — 403,
+	// common for messages cached from before this device paired) looks
+	// identical to a transient one here. Nothing marks m as permanently
+	// failed, so handleOpenChat retries it on every open forever, and the
+	// app has no way to show "this media is gone" instead of "still
+	// downloading." Found via on-device testing 2026-08-06; not fixed —
+	// would need a failure counter/marker persisted on the cached message.
 	err = client.DownloadMediaWithPathToFile(ctx, directPath, fileEncSHA256, fileSHA256, mediaKey, mediaType, "", false, f)
 	closeErr := f.Close()
 	if err != nil {
