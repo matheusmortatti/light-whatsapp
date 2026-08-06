@@ -98,9 +98,16 @@ class CoreProcess(private val context: Context) {
 
     fun events(): Flow<CoreEvent> = callbackFlow {
         val binary = File(context.applicationInfo.nativeLibraryDir, "libwhatsmeowcore.so")
-        val process = ProcessBuilder(binary.absolutePath)
-            .directory(context.filesDir)
-            .start()
+        val process = try {
+            ProcessBuilder(binary.absolutePath)
+                .directory(context.filesDir)
+                .start()
+        } catch (e: IOException) {
+            Log.e(TAG, "failed to start core binary at ${binary.absolutePath}", e)
+            trySend(CoreEvent.Error("failed to start core: ${e.message}"))
+            close()
+            return@callbackFlow
+        }
         this@CoreProcess.process = process
 
         // Human-readable logs go to stderr (see core/main.go) — just surface

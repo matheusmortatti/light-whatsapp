@@ -3,6 +3,7 @@ package com.matheusmortatti.lightwhatsapp
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.util.Log
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
@@ -57,29 +58,38 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
     init {
         viewModelScope.launch {
             coreProcess.events().collect { event ->
-                when (event) {
-                    is CoreEvent.Qr -> _state.value = LoginState.ShowingQr(encodeQr(event.code))
-                    is CoreEvent.Connected -> _state.value = LoginState.Connected(event.jid)
-                    is CoreEvent.LoggedOut -> {
-                        _state.value = LoginState.Idle
-                        _chats.value = emptyList()
-                        _selectedChat.value = null
-                        _messages.value = emptyList()
-                        _syncing.value = false
-                    }
-                    is CoreEvent.Error -> _state.value = LoginState.Error(event.message)
-                    is CoreEvent.Chats -> _chats.value = event.chats
-                    is CoreEvent.Messages -> {
-                        if (event.jid == _selectedChat.value?.jid) {
-                            _messages.value = mergeMessages(_messages.value, event.messages)
+                // A crash anywhere in here would otherwise kill the whole
+                // app with no trace beyond a generic AndroidRuntime dump —
+                // this is the single chokepoint every core event flows
+                // through. Log and drop the bad event instead so one
+                // malformed/unexpected event doesn't take the app down.
+                try {
+                    when (event) {
+                        is CoreEvent.Qr -> _state.value = LoginState.ShowingQr(encodeQr(event.code))
+                        is CoreEvent.Connected -> _state.value = LoginState.Connected(event.jid)
+                        is CoreEvent.LoggedOut -> {
+                            _state.value = LoginState.Idle
+                            _chats.value = emptyList()
+                            _selectedChat.value = null
+                            _messages.value = emptyList()
+                            _syncing.value = false
                         }
-                    }
-                    is CoreEvent.MessageUpdate -> {
-                        if (event.jid == _selectedChat.value?.jid) {
-                            _messages.value = mergeMessages(_messages.value, event.messages)
+                        is CoreEvent.Error -> _state.value = LoginState.Error(event.message)
+                        is CoreEvent.Chats -> _chats.value = event.chats
+                        is CoreEvent.Messages -> {
+                            if (event.jid == _selectedChat.value?.jid) {
+                                _messages.value = mergeMessages(_messages.value, event.messages)
+                            }
                         }
+                        is CoreEvent.MessageUpdate -> {
+                            if (event.jid == _selectedChat.value?.jid) {
+                                _messages.value = mergeMessages(_messages.value, event.messages)
+                            }
+                        }
+                        is CoreEvent.SyncStatus -> _syncing.value = event.syncing
                     }
-                    is CoreEvent.SyncStatus -> _syncing.value = event.syncing
+                } catch (e: Exception) {
+                    Log.e(TAG, "failed to handle core event: $event", e)
                 }
             }
         }
@@ -133,6 +143,10 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
             }
         }
         return bitmap.asImageBitmap()
+    }
+
+    companion object {
+        private const val TAG = "QrLoginViewModel"
     }
 }
 
