@@ -784,6 +784,15 @@ private fun messagePreviewText(message: Message): String = when (message.type) {
     else -> message.text
 }
 
+// WhatsApp reactions can arrive from different clients with or without a
+// trailing variation selector (U+FE0F/U+FE0E) on the same visual glyph —
+// e.g. a bare "heart" (U+2764) vs. "heart, emoji-style" (U+2764 U+FE0F).
+// Comparisons against QUICK_REACTIONS' canonical (variation-selector) forms
+// should treat those as equal; strip the selector on both sides before
+// comparing. Only comparisons are normalized — QUICK_REACTIONS and whatever
+// is passed to onPick/onSendReaction stay exactly as declared.
+private fun String.withoutVariationSelectors(): String = filterNot { it == '️' || it == '︎' }
+
 @Composable
 private fun ReactionPickerScreen(
     message: Message,
@@ -820,10 +829,12 @@ private fun ReactionPickerScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             for (emoji in QUICK_REACTIONS) {
+                val isCurrent = currentReaction != null &&
+                    emoji.withoutVariationSelectors() == currentReaction.withoutVariationSelectors()
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.lightClickable {
-                        onPick(if (emoji == currentReaction) "" else emoji)
+                        onPick(if (isCurrent) "" else emoji)
                     },
                 ) {
                     // Subtitle rather than Title — at Title size even one row
@@ -848,7 +859,7 @@ private fun ReactionPickerScreen(
                             .width(28.dp)
                             .height(2.dp)
                             .background(
-                                if (emoji == currentReaction) {
+                                if (isCurrent) {
                                     LightThemeTokens.colors.content
                                 } else {
                                     Color.Transparent
@@ -874,6 +885,9 @@ private fun MessageRow(
 ) {
     val bodyAlign = if (message.fromMe) TextAlign.End else TextAlign.Start
     Column(
+        // Deliberately on the outer Column, so the tap target includes the
+        // sender/time header rather than just the body below — a bigger tap
+        // target, and the header has no competing action of its own.
         modifier = modifier
             .fillMaxWidth()
             .lightClickable { onReact(message) },
