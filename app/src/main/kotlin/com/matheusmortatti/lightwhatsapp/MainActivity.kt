@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -46,6 +47,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.material3.Text
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -809,35 +811,50 @@ private fun ReactionPickerScreen(
                 .fillMaxWidth()
                 .padding(horizontal = 24.dp, vertical = 16.dp),
         )
-        // Laid out as two rows of 3 rather than one row of 6 — at
-        // LightTextVariant.Title size, 6 emoji in a single Row overflow the
-        // LP3's screen width (confirmed on real hardware: the last two,
-        // "😢" and "🙏", rendered entirely off-screen with no scroll
-        // available to reach them). A 3x2 grid keeps every emoji large and
-        // fully within the tappable/visible frame.
-        Column(
+        Row(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.Center,
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            for (row in QUICK_REACTIONS.chunked(3)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically,
+            for (emoji in QUICK_REACTIONS) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.lightClickable {
+                        onPick(if (emoji == currentReaction) "" else emoji)
+                    },
                 ) {
-                    for (emoji in row) {
-                        LightText(
-                            text = emoji,
-                            variant = LightTextVariant.Title,
-                            underline = emoji == currentReaction,
-                            modifier = Modifier.lightClickable {
-                                onPick(if (emoji == currentReaction) "" else emoji)
-                            },
-                        )
-                    }
+                    // Subtitle rather than Title — at Title size even one row
+                    // of all 6 overflows the LP3's screen width (confirmed on
+                    // real hardware: the last two, "😢" and "🙏", rendered
+                    // entirely off-screen with no scroll available to reach
+                    // them).
+                    LightText(text = emoji, variant = LightTextVariant.Subtitle)
+                    // A bar drawn below the glyph rather than LightText's
+                    // built-in `underline` (TextDecoration.Underline): that
+                    // decoration sits at a fixed offset from the font's text
+                    // baseline, but a color emoji glyph draws much taller
+                    // than that baseline expects, so the line cut across the
+                    // glyph itself instead of sitting under it (confirmed on
+                    // real hardware). Reserving the slot on every emoji
+                    // (transparent when unselected) keeps every glyph at the
+                    // same vertical position regardless of which one is
+                    // marked.
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 4.dp)
+                            .width(28.dp)
+                            .height(2.dp)
+                            .background(
+                                if (emoji == currentReaction) {
+                                    LightThemeTokens.colors.content
+                                } else {
+                                    Color.Transparent
+                                },
+                            ),
+                    )
                 }
             }
         }
