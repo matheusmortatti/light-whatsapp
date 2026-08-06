@@ -84,4 +84,6 @@ dependencies {
     // QR encoding: not usable from tool/ (not in the light-sdk plugin's
     // dependency allowlist), fine here since this module doesn't apply it.
     implementation("com.google.zxing:core:3.5.3")
+
+    testImplementation(libs.kotlin.test)
 }

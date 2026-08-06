@@ -71,7 +71,7 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
                     is CoreEvent.Chats -> _chats.value = event.chats
                     is CoreEvent.Messages -> {
                         if (event.jid == _selectedChat.value?.jid) {
-                            _messages.value = event.messages
+                            _messages.value = mergeMessages(_messages.value, event.messages)
                         }
                     }
                     is CoreEvent.MessageUpdate -> {
@@ -124,21 +124,6 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
         coreProcess.sendReaction(jid, messageId, emoji)
     }
 
-    // Applies a message_update's delta onto the currently held list: existing
-    // IDs are replaced in place (so Compose's key-based diffing only
-    // invalidates that one row), unknown IDs are new messages and get
-    // appended, re-sorting only if that happened — updates alone (the common
-    // case: a download completing, a status receipt) never need a re-sort
-    // since they don't change any message's position.
-    private fun mergeMessages(current: List<Message>, updates: List<Message>): List<Message> {
-        val byId = current.associateByTo(LinkedHashMap()) { it.id }
-        var appended = false
-        for (update in updates) {
-            if (byId.put(update.id, update) == null) appended = true
-        }
-        return if (appended) byId.values.sortedBy { it.timestamp } else byId.values.toList()
-    }
-
     private fun encodeQr(text: String, size: Int = 512): ImageBitmap {
         val matrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)
@@ -149,4 +134,27 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
         }
         return bitmap.asImageBitmap()
     }
+}
+
+// Folds an incoming message list — either a message_update's delta or a
+// fresh full "messages" reply from re-opening the chat — onto the
+// currently held list: existing IDs are replaced in place (so Compose's
+// key-based diffing only invalidates that one row), unknown IDs are new
+// messages and get appended, re-sorting only if that happened.
+//
+// Deliberately never *removes* an ID that's missing from updates: core
+// emits the full "messages" snapshot from a list it read before doing
+// per-message mention resolution (see core/main.go's handleOpenChat), so a
+// live message can arrive — and get merged in via its own message_update —
+// while that snapshot is still in flight. If the snapshot then overwrote
+// the held list outright, it would silently erase the just-merged
+// message(s) it raced past. Folding instead of replacing makes that race
+// harmless: the snapshot can only add to or refresh what's already shown.
+internal fun mergeMessages(current: List<Message>, updates: List<Message>): List<Message> {
+    val byId = current.associateByTo(LinkedHashMap()) { it.id }
+    var appended = false
+    for (update in updates) {
+        if (byId.put(update.id, update) == null) appended = true
+    }
+    return if (appended) byId.values.sortedBy { it.timestamp } else byId.values.toList()
 }
