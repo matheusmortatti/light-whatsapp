@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1395,7 +1396,8 @@ func handleSendReaction(ctx context.Context, client *whatsmeow.Client, logger wa
 	found := false
 	for i, cur := range list {
 		if cur.ID == messageID {
-			cur.Reactions = applyReaction(cur.Reactions, client.Store.ID.ToNonAD().String(), "", true, emoji)
+			ownKey := canonicalizeChatJID(ctx, client, client.Store.GetJID()).ToNonAD().String()
+			cur.Reactions = applyReaction(cur.Reactions, ownKey, "", true, emoji)
 			list[i] = cur
 			updated = cur
 			found = true
@@ -1785,6 +1787,7 @@ func handleReaction(ctx context.Context, client *whatsmeow.Client, evt *events.M
 	if evt.Info.IsGroup && !evt.Info.IsFromMe {
 		senderName = evt.Info.PushName
 	}
+	senderKey := canonicalizeChatJID(ctx, client, evt.Info.Sender).ToNonAD().String()
 
 	messagesMu.Lock()
 	list, ok := messages[jidStr]
@@ -1793,7 +1796,7 @@ func handleReaction(ctx context.Context, client *whatsmeow.Client, evt *events.M
 	if ok {
 		for i, cur := range list {
 			if cur.ID == targetID {
-				cur.Reactions = applyReaction(cur.Reactions, evt.Info.Sender.ToNonAD().String(), senderName, evt.Info.IsFromMe, r.GetText())
+				cur.Reactions = applyReaction(cur.Reactions, senderKey, senderName, evt.Info.IsFromMe, r.GetText())
 				list[i] = cur
 				updated = cur
 				found = true
@@ -1814,8 +1817,14 @@ func handleReaction(ctx context.Context, client *whatsmeow.Client, evt *events.M
 
 // applyReaction upserts sender's reaction into reactions: emoji == "" (see
 // whatsmeow.RemoveReactionText) removes sender's existing entry if any,
-// otherwise sender's entry is added or replaced with emoji.
+// otherwise sender's entry is added or replaced with emoji. Always returns a
+// clone with its own backing array — reactions is never mutated in place —
+// since callers hold this slice inside a chatMessage that's also read (and
+// JSON-marshaled by emit) after messagesMu is released, so a second
+// goroutine calling applyReaction concurrently on the same message must not
+// race with that read.
 func applyReaction(reactions []chatReaction, sender, senderName string, fromMe bool, emoji string) []chatReaction {
+	reactions = slices.Clone(reactions)
 	idx := -1
 	for i, r := range reactions {
 		if r.Sender == sender {
