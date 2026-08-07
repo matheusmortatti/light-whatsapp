@@ -24,6 +24,11 @@ private fun testMessage(id: String, timestamp: Long, text: String = id) = Messag
     videoFailed = false,
     stickerFailed = false,
     reactions = emptyList(),
+    quotedId = null,
+    quotedFromMe = false,
+    quotedSenderName = null,
+    quotedType = null,
+    quotedText = "",
 )
 
 class MergeMessagesTest {
