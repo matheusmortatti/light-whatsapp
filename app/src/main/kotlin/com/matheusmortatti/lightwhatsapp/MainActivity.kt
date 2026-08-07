@@ -377,6 +377,7 @@ private fun ChatDetailScreen(
             reactingTo != null -> reactingTo = null
             playingVideo != null -> playingVideo = null
             composing -> composing = false
+            recordingFailed -> recordingFailed = false
             recording -> cancelRecording()
             else -> onBack()
         }
