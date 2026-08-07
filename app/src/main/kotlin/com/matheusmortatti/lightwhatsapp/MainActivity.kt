@@ -934,6 +934,8 @@ private fun MessageRow(
                     } else {
                         MessageBodyText(text = "[Photo]", lighten = true, align = bodyAlign)
                     }
+                } else if (message.imageFailed) {
+                    MessageBodyText(text = "[Photo unavailable]", lighten = true, align = bodyAlign)
                 } else {
                     MessageBodyText(text = "[Photo]", lighten = true, align = bodyAlign)
                 }
@@ -957,6 +959,8 @@ private fun MessageRow(
                     } else {
                         MessageBodyText(text = "[Sticker]", lighten = true, align = bodyAlign)
                     }
+                } else if (message.stickerFailed) {
+                    MessageBodyText(text = "[Sticker unavailable]", lighten = true, align = bodyAlign)
                 } else {
                     MessageBodyText(text = "[Sticker]", lighten = true, align = bodyAlign)
                 }
@@ -986,6 +990,12 @@ private fun MessageRow(
                             contentDescription = "Play",
                         )
                     }
+                } else if (message.videoFailed) {
+                    MessageBodyText(
+                        text = if (message.isGif) "[GIF unavailable]" else "[Video unavailable]",
+                        lighten = true,
+                        align = bodyAlign,
+                    )
                 } else {
                     MessageBodyText(
                         text = if (message.isGif) "[GIF]" else "[Video]",
@@ -1002,6 +1012,8 @@ private fun MessageRow(
                 val path = message.audioPath
                 if (path != null) {
                     AudioMessageRow(relativePath = path, seconds = message.audioSeconds)
+                } else if (message.audioFailed) {
+                    MessageBodyText(text = "[Voice message unavailable]", lighten = true, align = bodyAlign)
                 } else {
                     MessageBodyText(text = "[Voice message]", lighten = true, align = bodyAlign)
                 }

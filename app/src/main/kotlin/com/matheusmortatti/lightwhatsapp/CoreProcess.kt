@@ -53,6 +53,14 @@ data class Message(
     // never reach here — core/main.go treats them as unsupported.
     val stickerPath: String?,
     val stickerIsAnimated: Boolean,
+    // True once core has classified this media's download as permanently
+    // failed (403/404/410 — see core/main.go's isPermanentDownloadFailure).
+    // The corresponding *Path stays null forever in that case; no further
+    // download will be retried. No retry action exists yet.
+    val imageFailed: Boolean,
+    val audioFailed: Boolean,
+    val videoFailed: Boolean,
+    val stickerFailed: Boolean,
     // Reactions on this message — see core/main.go's chatMessage.Reactions.
     // Populated whether the message is ours or theirs.
     val reactions: List<Reaction>,
@@ -269,6 +277,10 @@ class CoreProcess(private val context: Context) {
                 isGif = o.optBoolean("is_gif", false),
                 stickerPath = o.optString("sticker_path").ifBlank { null },
                 stickerIsAnimated = o.optBoolean("sticker_is_animated", false),
+                imageFailed = o.optBoolean("image_failed", false),
+                audioFailed = o.optBoolean("audio_failed", false),
+                videoFailed = o.optBoolean("video_failed", false),
+                stickerFailed = o.optBoolean("sticker_failed", false),
                 reactions = parseReactions(o.optJSONArray("reactions")),
             )
         }

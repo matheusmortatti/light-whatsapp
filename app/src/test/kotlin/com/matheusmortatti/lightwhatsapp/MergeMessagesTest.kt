@@ -19,6 +19,10 @@ private fun testMessage(id: String, timestamp: Long, text: String = id) = Messag
     isGif = false,
     stickerPath = null,
     stickerIsAnimated = false,
+    imageFailed = false,
+    audioFailed = false,
+    videoFailed = false,
+    stickerFailed = false,
     reactions = emptyList(),
 )
 
