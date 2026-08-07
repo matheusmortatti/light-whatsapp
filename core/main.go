@@ -751,7 +751,6 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 		return
 	}
 	text, msgType, img, audio, video, sticker, ci, ok := extractMessage(waMsg)
-	_ = ci
 	if !ok {
 		return
 	}
@@ -775,6 +774,7 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	if msgType == "sticker" && sticker != nil {
 		setStickerFields(&cm, sticker)
 	}
+	setQuotedFields(ctx, client, &cm, ci)
 	// A message we sent from a different linked device (e.g. the phone)
 	// arrives here with no status of its own — handleSendMessage/
 	// handleSendAudio only stamp "sent" for messages sent through *this*
@@ -1913,7 +1913,6 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 
 	text, msgType, img, audio, video, sticker, ci, ok := extractMessage(evt.Message)
-	_ = ci
 	if !ok {
 		return
 	}
@@ -1936,6 +1935,7 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	if msgType == "sticker" && sticker != nil {
 		setStickerFields(&cm, sticker)
 	}
+	setQuotedFields(ctx, client, &cm, ci)
 	// Same gap as extractHistoryMessage: a message sent from another linked
 	// device arrives here live with no status. Unlike history sync, a live
 	// *events.Message carries no delivery/read state of its own — but its
