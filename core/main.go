@@ -754,10 +754,6 @@ func imagePath(jid, msgID, mimetype string) string {
 	return filepath.Join("media", jid, msgID+"."+imageExtension(mimetype))
 }
 
-// downloadMedia fetches one message's media, streaming straight to disk via
-// DownloadMediaWithPathToFile rather than buffering the whole decrypted
-// file in memory first — core runs on the Light Phone III itself, and a
-// pile of simultaneous multi-MB in-memory buffers is a real OOM risk.
 // isPermanentDownloadFailure reports whether err means the media is gone for
 // good (expired link, deleted, no longer authorized) rather than a transient
 // failure worth retrying on the next chat open. Only HTTP 403/404/410 are
@@ -777,6 +773,10 @@ func isPermanentDownloadFailure(err error) bool {
 	}
 }
 
+// downloadMedia fetches one message's media, streaming straight to disk via
+// DownloadMediaWithPathToFile rather than buffering the whole decrypted
+// file in memory first — core runs on the Light Phone III itself, and a
+// pile of simultaneous multi-MB in-memory buffers is a real OOM risk.
 // mediaDownloadSem bounds how many of these run concurrently, regardless of
 // type, since handleOpenChat can dispatch one goroutine per undownloaded
 // item in a chat with no limit of its own. Once the file lands, apply is
