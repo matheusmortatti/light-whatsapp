@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -400,6 +403,29 @@ func TestWebMessageInfoStatus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := webMessageInfoStatus(tt.status); got != tt.want {
 				t.Errorf("webMessageInfoStatus(%v) = %q, want %q", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsPermanentDownloadFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"403 is permanent", whatsmeow.DownloadHTTPError{Response: &http.Response{StatusCode: 403}}, true},
+		{"404 is permanent", whatsmeow.DownloadHTTPError{Response: &http.Response{StatusCode: 404}}, true},
+		{"410 is permanent", whatsmeow.DownloadHTTPError{Response: &http.Response{StatusCode: 410}}, true},
+		{"500 is transient", whatsmeow.DownloadHTTPError{Response: &http.Response{StatusCode: 500}}, false},
+		{"wrapped 403 is still permanent", fmt.Errorf("download failed: %w", whatsmeow.DownloadHTTPError{Response: &http.Response{StatusCode: 403}}), true},
+		{"generic network error is transient", errors.New("connection reset"), false},
+		{"nil is transient", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isPermanentDownloadFailure(c.err); got != c.want {
+				t.Errorf("isPermanentDownloadFailure(%v) = %v, want %v", c.err, got, c.want)
 			}
 		})
 	}

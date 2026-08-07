@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -757,6 +758,25 @@ func imagePath(jid, msgID, mimetype string) string {
 // DownloadMediaWithPathToFile rather than buffering the whole decrypted
 // file in memory first — core runs on the Light Phone III itself, and a
 // pile of simultaneous multi-MB in-memory buffers is a real OOM risk.
+// isPermanentDownloadFailure reports whether err means the media is gone for
+// good (expired link, deleted, no longer authorized) rather than a transient
+// failure worth retrying on the next chat open. Only HTTP 403/404/410 are
+// treated as permanent; everything else (network errors, timeouts,
+// decrypt/hash failures, unknown errors) is transient, matching whatsmeow's
+// own DownloadHTTPError sentinels (see go.mau.fi/whatsmeow's errors.go).
+func isPermanentDownloadFailure(err error) bool {
+	var httpErr whatsmeow.DownloadHTTPError
+	if !errors.As(err, &httpErr) || httpErr.Response == nil {
+		return false
+	}
+	switch httpErr.StatusCode {
+	case 403, 404, 410:
+		return true
+	default:
+		return false
+	}
+}
+
 // mediaDownloadSem bounds how many of these run concurrently, regardless of
 // type, since handleOpenChat can dispatch one goroutine per undownloaded
 // item in a chat with no limit of its own. Once the file lands, apply is
