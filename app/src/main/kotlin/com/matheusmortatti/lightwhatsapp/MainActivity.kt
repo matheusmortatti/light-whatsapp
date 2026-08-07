@@ -337,6 +337,7 @@ private fun ChatDetailScreen(
     // useful to restore anyway.
     var recording by remember(chat.jid) { mutableStateOf(false) }
     var recordingStartMs by remember(chat.jid) { mutableStateOf(0L) }
+    var recordingFailed by remember(chat.jid) { mutableStateOf(false) }
     val voiceRecorder = remember { VoiceRecorder(context) }
     DisposableEffect(Unit) { onDispose { voiceRecorder.cancel() } }
 
@@ -447,6 +448,14 @@ private fun ChatDetailScreen(
         return
     }
 
+    if (recordingFailed) {
+        RecordingFailedScreen(
+            chatName = chat.name,
+            onDismiss = { recordingFailed = false },
+        )
+        return
+    }
+
     if (recording) {
         val elapsedMs by produceState(initialValue = 0L, recordingStartMs) {
             while (true) {
@@ -459,16 +468,13 @@ private fun ChatDetailScreen(
             elapsedMs = elapsedMs,
             onCancel = { cancelRecording() },
             onSend = {
-                // Known gap: when stop() rejects the recording (see
-                // VoiceRecorder's Log.w) this screen just closes with no
-                // message sent and no user-facing error — logged now, but
-                // still indistinguishable from a normal cancel to the user.
-                // Found via on-device testing 2026-08-06; not fixed.
                 val result = voiceRecorder.stop()
                 recording = false
                 if (result != null) {
                     val (file, durationMs) = result
                     onSendAudio(file.relativeTo(context.filesDir).path, durationMs)
+                } else {
+                    recordingFailed = true
                 }
             },
         )
@@ -711,6 +717,35 @@ private fun RecordingScreen(
                     modifier = Modifier.padding(top = 4.dp),
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun RecordingFailedScreen(
+    chatName: String,
+    onDismiss: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(LightThemeTokens.colors.background),
+    ) {
+        LightTopBar(
+            leftButton = LightBarButton.LightIcon(icon = LightIcons.CLOSE, onClick = onDismiss),
+            center = LightTopBarCenter.Text(chatName),
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            LightText(
+                text = "Voice message wasn't sent",
+                variant = LightTextVariant.Copy,
+                lighten = true,
+            )
         }
     }
 }
