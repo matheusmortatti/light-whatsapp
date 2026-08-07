@@ -103,22 +103,35 @@ the first, `57b06eb` for the second) and indexed here for visibility. Both
 are product/UX decisions, not correctness bugs, and out of scope for this
 pass.
 
-- **Media downloads retry forever with no permanent-failure state.**
-  `downloadMedia` (`core/main.go`, in `downloadImage`/`downloadAudio`/etc.)
-  has no way to distinguish a permanently failed download (expired media
-  URL — a 403, common for messages cached from before this device paired)
-  from a transient one. Nothing marks the cached message as permanently
-  failed, so `handleOpenChat` retries it on every chat open, forever, and
-  the app has no way to show "this media is gone" instead of "still
-  downloading." Confirmed live: self-chat has a cached image predating
-  pairing that 403s on every retry (`logger.Warnf` already logs it
-  correctly, so this is a UX gap, not a logging gap).
 - **A failed voice-recording send gives no user-facing feedback.** Even
   with the new logging from fix #4 above, `RecordingScreen.onSend`
   (`MainActivity.kt`) still just closes the recording screen silently when
   `voiceRecorder.stop()` returns `null` — no toast, no error state. The
   user has no way to tell "it didn't send" from "it sent and I just don't
   see it yet" without checking logcat.
+
+### Closed since this review
+
+- **Media downloads retry forever with no permanent-failure state** — was
+  the first bullet above (`downloadMedia` in `core/main.go` had no way to
+  distinguish a permanently failed download, e.g. a 403 on media cached
+  from before this device paired, from a transient one, so
+  `handleOpenChat` retried it on every chat open forever). Fixed by the
+  `2026-08-06-media-failure-and-voice-feedback` plan: core now classifies
+  HTTP 403/404/410 as permanent (`ceedc4b`, `a2c5306`), persists a
+  per-type `*_failed` flag and stops re-queuing the download
+  (`b677d1b`, `a2c5306`), and the app renders "[Photo unavailable]" /
+  "[Voice message unavailable]" / "[Video unavailable]" / "[GIF
+  unavailable]" / "[Sticker unavailable]" instead of retrying forever
+  (`f7332f6`). Verified live on real LP3 (serial `LP3LHMA551300893`):
+  self-chat's pre-pairing image that used to 403 forever now shows
+  "[Photo unavailable]", persisted to the on-disk message cache
+  (`image_failed: true`, direct path cleared), and `adb logcat` showed the
+  403 `Warnf` exactly once, with `open_chat` reporting "0 images to
+  download" for that chat across 3 subsequent open/close cycles — no
+  retry spam. Other media in the same chat (4 images, 5 audio, 5 gifs, 4
+  stickers, 1 video) all still downloaded and rendered normally,
+  confirming no regression.
 
 ## Also audited, found clean
 
