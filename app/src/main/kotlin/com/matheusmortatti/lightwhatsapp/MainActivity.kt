@@ -83,7 +83,6 @@ import com.thelightphone.sdk.ui.designVerticalPxToSp
 import com.thelightphone.sdk.ui.gridUnitsAsDp
 import com.thelightphone.sdk.ui.lightClickable
 import java.io.File
-import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -1193,7 +1192,11 @@ private fun AudioMessageRow(relativePath: String, seconds: Int, modifier: Modifi
                 mediaPlayer.setDataSource(File(context.filesDir, relativePath).absolutePath)
                 mediaPlayer.prepare()
                 prepared = true
-            } catch (e: IOException) {
+            } catch (e: Exception) {
+                // setDataSource/prepare are documented to throw IOException,
+                // IllegalStateException, IllegalArgumentException, and
+                // SecurityException depending on the file/codec/device state
+                // — any of them means this row just can't play, not a crash.
                 Log.w("MainActivity", "failed to prepare audio $relativePath", e)
             }
         }
