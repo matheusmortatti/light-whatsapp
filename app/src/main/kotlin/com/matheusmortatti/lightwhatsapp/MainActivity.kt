@@ -978,9 +978,9 @@ private fun MessageRow(
         // replying to, then its own content.
         if (message.quotedType != null) {
             val quotedSenderLabel = if (message.quotedFromMe) {
-                "You"
+                "Replying to you"
             } else {
-                message.quotedSenderName ?: chatName
+                "Replying to " + (message.quotedSenderName ?: chatName)
             }
             ChatMetaText(text = quotedSenderLabel)
             MessageBodyText(

@@ -645,6 +645,7 @@ func resolveMentionsInList(ctx context.Context, client *whatsmeow.Client, list [
 	out := make([]chatMessage, len(list))
 	for i, m := range list {
 		m.Text = resolveMentions(ctx, client, m.Text)
+		m.QuotedText = resolveMentions(ctx, client, m.QuotedText)
 		out[i] = m
 	}
 	return out
