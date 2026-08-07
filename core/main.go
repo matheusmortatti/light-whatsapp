@@ -835,6 +835,7 @@ func downloadMedia(
 	fileEncSHA256, fileSHA256, mediaKey []byte,
 	path string,
 	apply func(cm *chatMessage, path string),
+	applyFailure func(cm *chatMessage),
 ) {
 	mediaDownloadSem <- struct{}{}
 	defer func() { <-mediaDownloadSem }()
@@ -848,18 +849,23 @@ func downloadMedia(
 		logger.Warnf("failed to create %s file %s/%s: %v", kind, jid, m.ID, err)
 		return
 	}
-	// Known gap: a permanent failure (e.g. an expired media URL — 403,
-	// common for messages cached from before this device paired) looks
-	// identical to a transient one here. Nothing marks m as permanently
-	// failed, so handleOpenChat retries it on every open forever, and the
-	// app has no way to show "this media is gone" instead of "still
-	// downloading." Found via on-device testing 2026-08-06; not fixed —
-	// would need a failure counter/marker persisted on the cached message.
 	err = client.DownloadMediaWithPathToFile(ctx, directPath, fileEncSHA256, fileSHA256, mediaKey, mediaType, "", false, f)
 	closeErr := f.Close()
 	if err != nil {
 		logger.Warnf("failed to download %s %s/%s: %v", kind, jid, m.ID, err)
 		_ = os.Remove(path)
+		if isPermanentDownloadFailure(err) {
+			// Known gap: no way for the user to manually retry from here —
+			// a tap-to-retry would need a new app->core IPC command plus a
+			// way to re-derive a fresh direct path, since the one that just
+			// 403/404/410'd is gone for good. Worth scoping separately if
+			// real-world 404/410s turn out to be transient-in-disguise
+			// (e.g. media re-sent under a new id). Found via on-device
+			// testing 2026-08-06.
+			if updated, found := updateCachedMessage(jid, messages, m.ID, applyFailure); found {
+				emit(event{Type: "message_update", JID: jid, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
+			}
+		}
 		return
 	}
 	if closeErr != nil {
@@ -891,7 +897,20 @@ func downloadImage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 			cm.ImageFileSHA256 = nil
 			cm.ImageFileEncSHA256 = nil
 			cm.ImageMimetype = ""
-		})
+		},
+		applyImageFailure,
+	)
+}
+
+// applyImageFailure marks m as permanently failed to download and clears its
+// now-useless key material, leaving unrelated fields (like a caption) alone.
+func applyImageFailure(cm *chatMessage) {
+	cm.ImageFailed = true
+	cm.ImageDirectPath = ""
+	cm.ImageMediaKey = nil
+	cm.ImageFileSHA256 = nil
+	cm.ImageFileEncSHA256 = nil
+	cm.ImageMimetype = ""
 }
 
 // audioExtension maps a media mimetype to a file extension. WhatsApp voice
@@ -930,7 +949,20 @@ func downloadAudio(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 			cm.AudioFileSHA256 = nil
 			cm.AudioFileEncSHA256 = nil
 			cm.AudioMimetype = ""
-		})
+		},
+		applyAudioFailure,
+	)
+}
+
+// applyAudioFailure marks m as permanently failed to download and clears its
+// now-useless key material, leaving unrelated fields alone.
+func applyAudioFailure(cm *chatMessage) {
+	cm.AudioFailed = true
+	cm.AudioDirectPath = ""
+	cm.AudioMediaKey = nil
+	cm.AudioFileSHA256 = nil
+	cm.AudioFileEncSHA256 = nil
+	cm.AudioMimetype = ""
 }
 
 // videoExtension maps a media mimetype to a file extension; WhatsApp videos
@@ -963,7 +995,20 @@ func downloadVideo(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 			cm.VideoFileSHA256 = nil
 			cm.VideoFileEncSHA256 = nil
 			cm.VideoMimetype = ""
-		})
+		},
+		applyVideoFailure,
+	)
+}
+
+// applyVideoFailure marks m as permanently failed to download and clears its
+// now-useless key material, leaving unrelated fields alone.
+func applyVideoFailure(cm *chatMessage) {
+	cm.VideoFailed = true
+	cm.VideoDirectPath = ""
+	cm.VideoMediaKey = nil
+	cm.VideoFileSHA256 = nil
+	cm.VideoFileEncSHA256 = nil
+	cm.VideoMimetype = ""
 }
 
 // stickerExtension maps a media mimetype to a file extension; WhatsApp
@@ -996,7 +1041,20 @@ func downloadSticker(ctx context.Context, client *whatsmeow.Client, logger waLog
 			cm.StickerFileSHA256 = nil
 			cm.StickerFileEncSHA256 = nil
 			cm.StickerMimetype = ""
-		})
+		},
+		applyStickerFailure,
+	)
+}
+
+// applyStickerFailure marks m as permanently failed to download and clears
+// its now-useless key material, leaving unrelated fields alone.
+func applyStickerFailure(cm *chatMessage) {
+	cm.StickerFailed = true
+	cm.StickerDirectPath = ""
+	cm.StickerMediaKey = nil
+	cm.StickerFileSHA256 = nil
+	cm.StickerFileEncSHA256 = nil
+	cm.StickerMimetype = ""
 }
 
 // markChatRead sends WhatsApp read receipts for every not-from-me message in

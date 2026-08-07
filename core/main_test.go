@@ -462,3 +462,30 @@ func TestUpdateCachedMessage(t *testing.T) {
 		t.Error("expected found=false for missing jid")
 	}
 }
+
+func TestApplyImageFailureClearsDownloadState(t *testing.T) {
+	cm := chatMessage{
+		ID:                 "m1",
+		Type:               "image",
+		ImageDirectPath:    "/some/path",
+		ImageMediaKey:      []byte("key"),
+		ImageFileSHA256:    []byte("sha"),
+		ImageFileEncSHA256: []byte("encsha"),
+		ImageMimetype:      "image/jpeg",
+		Text:               "caption preserved",
+	}
+	applyImageFailure(&cm)
+
+	if !cm.ImageFailed {
+		t.Error("expected ImageFailed = true")
+	}
+	if cm.ImageDirectPath != "" {
+		t.Errorf("expected ImageDirectPath cleared, got %q", cm.ImageDirectPath)
+	}
+	if cm.ImageMediaKey != nil || cm.ImageFileSHA256 != nil || cm.ImageFileEncSHA256 != nil || cm.ImageMimetype != "" {
+		t.Error("expected all image key material cleared")
+	}
+	if cm.Text != "caption preserved" {
+		t.Error("applyImageFailure must not touch unrelated fields")
+	}
+}
