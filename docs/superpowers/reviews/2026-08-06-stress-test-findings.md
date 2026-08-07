@@ -91,12 +91,13 @@ with zero logging. The caller (`MainActivity.kt`'s `RecordingScreen.onSend`)
 does nothing but close the recording screen either way, so a failed
 send-after-record was indistinguishable from a normal cancel in the logs.
 
-**Fix.** Added `Log.w` in the catch block, and a comment at the call site
-cross-referencing the residual gap below.
+**Fix.** Added `Log.w` in the catch block. (A comment was also added at the
+call site cross-referencing the residual gap below; it was removed by
+`1d74e09` once that gap was closed — see "Closed since this review".)
 
 Commit: `57b06eb`.
 
-## Known gaps — documented, not fixed
+## Known gaps — since closed
 
 Both gaps originally identified in this review (see commit `4b6565c` for
 the first, `57b06eb` for the second) were product/UX decisions, not
@@ -106,11 +107,11 @@ review.
 
 ### Closed since this review
 
-- **Media downloads retry forever with no permanent-failure state** — was
-  the first bullet above (`downloadMedia` in `core/main.go` had no way to
-  distinguish a permanently failed download, e.g. a 403 on media cached
-  from before this device paired, from a transient one, so
-  `handleOpenChat` retried it on every chat open forever). Fixed by the
+- **Media downloads retry forever with no permanent-failure state** —
+  `downloadMedia` in `core/main.go` had no way to distinguish a
+  permanently failed download, e.g. a 403 on media cached from before
+  this device paired, from a transient one, so `handleOpenChat` retried
+  it on every chat open forever. Fixed by the
   `2026-08-06-media-failure-and-voice-feedback` plan: core now classifies
   HTTP 403/404/410 as permanent (`ceedc4b`, `a2c5306`), persists a
   per-type `*_failed` flag and stops re-queuing the download
@@ -127,13 +128,13 @@ review.
   stickers, 1 video) all still downloaded and rendered normally,
   confirming no regression.
 
-- **A failed voice-recording send gave no user-facing feedback** — was the
-  second bullet above (`RecordingScreen.onSend` in `MainActivity.kt` just
-  closed the recording screen silently when `voiceRecorder.stop()`
-  returned `null`, indistinguishable from a normal cancel without checking
-  logcat). Fixed by the `2026-08-06-media-failure-and-voice-feedback`
-  plan: a new dismissible `RecordingFailedScreen` now shows "Voice message
-  wasn't sent" whenever `stop()` rejects the recording, dismissible via
+- **A failed voice-recording send gave no user-facing feedback** —
+  `RecordingScreen.onSend` in `MainActivity.kt` just closed the recording
+  screen silently when `voiceRecorder.stop()` returned `null`,
+  indistinguishable from a normal cancel without checking logcat. Fixed by
+  the `2026-08-06-media-failure-and-voice-feedback` plan: a new dismissible
+  `RecordingFailedScreen` now shows "Voice message wasn't sent" whenever
+  `stop()` rejects the recording, dismissible via
   either the top-bar CLOSE icon or hardware/predictive back
   (`1d74e09`, `ed56276`). Verified live on real LP3 (serial
   `LP3LHMA551300893`), driven via `adb`/`uiautomator`: a very-short

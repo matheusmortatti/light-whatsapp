@@ -439,7 +439,7 @@ func TestUpdateCachedMessage(t *testing.T) {
 		},
 	}
 
-	updated, found := updateCachedMessage("jid1", messages, "b", func(cm *chatMessage) {
+	updated, found := updateCachedMessage(messages, "jid1", "b", func(cm *chatMessage) {
 		cm.Text = "edited"
 	})
 	if !found {
@@ -452,12 +452,12 @@ func TestUpdateCachedMessage(t *testing.T) {
 		t.Errorf("messages map not updated in place: got %q", messages["jid1"][1].Text)
 	}
 
-	_, found = updateCachedMessage("jid1", messages, "missing-id", func(cm *chatMessage) {})
+	_, found = updateCachedMessage(messages, "jid1", "missing-id", func(cm *chatMessage) {})
 	if found {
 		t.Error("expected found=false for missing message id")
 	}
 
-	_, found = updateCachedMessage("missing-jid", messages, "a", func(cm *chatMessage) {})
+	_, found = updateCachedMessage(messages, "missing-jid", "a", func(cm *chatMessage) {})
 	if found {
 		t.Error("expected found=false for missing jid")
 	}

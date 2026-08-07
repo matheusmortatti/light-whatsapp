@@ -469,13 +469,22 @@ private fun ChatDetailScreen(
             elapsedMs = elapsedMs,
             onCancel = { cancelRecording() },
             onSend = {
-                val result = voiceRecorder.stop()
-                recording = false
-                if (result != null) {
-                    val (file, durationMs) = result
-                    onSendAudio(file.relativeTo(context.filesDir).path, durationMs)
-                } else {
-                    recordingFailed = true
+                // Guard against a double SEND tap: if a first tap already
+                // stopped the recording (and sent it) before this screen was
+                // dismissed, a second tap lands here with recording already
+                // false. Without this, voiceRecorder.stop()'s "nothing
+                // active" null (same return value as a genuine platform
+                // rejection) would incorrectly show the "wasn't sent"
+                // screen for a message that actually sent fine.
+                if (recording) {
+                    val result = voiceRecorder.stop()
+                    recording = false
+                    if (result != null) {
+                        val (file, durationMs) = result
+                        onSendAudio(file.relativeTo(context.filesDir).path, durationMs)
+                    } else {
+                        recordingFailed = true
+                    }
                 }
             },
         )
@@ -812,9 +821,12 @@ private fun VideoPlayerScreen(
 // is the agreed breadth rather than a larger or fully open picker.
 private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
 
-// A one-line summary of message shown atop the reaction picker, reusing the
+// A one-line summary of message shown atop the reaction picker. Reuses the
 // same placeholder labels MessageRow renders for a not-yet-downloaded or
-// non-text message.
+// non-text message, but does NOT mirror MessageRow's permanently-failed
+// "unavailable" labels (e.g. "[Photo unavailable]") — a perma-failed photo
+// still shows the plain "[Photo]" preview here; only the chat row itself
+// distinguishes the failure state.
 private fun messagePreviewText(message: Message): String = when (message.type) {
     "image" -> message.text.ifBlank { "[Photo]" }
     "sticker" -> "[Sticker]"

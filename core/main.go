@@ -171,7 +171,10 @@ type chatMessage struct {
 	// type's *Failed is true (its *DirectPath is cleared alongside it, which
 	// is what handleOpenChat actually checks). The app renders a terminal
 	// "unavailable" label instead of retrying. No retry path exists yet for
-	// the user to clear this — see the comment in downloadMedia.
+	// the user to clear this — see the comment in downloadMedia. Note this
+	// isn't truly terminal: a history-sync replay of the same message id
+	// (see upsertMessage) can currently reset this, a pre-existing
+	// cache-replay gap this feature doesn't address.
 	ImageFailed   bool `json:"image_failed,omitempty"`
 	AudioFailed   bool `json:"audio_failed,omitempty"`
 	VideoFailed   bool `json:"video_failed,omitempty"`
@@ -790,7 +793,7 @@ func isPermanentDownloadFailure(err error) bool {
 // returns the mutated message plus whether it was found. Used by
 // downloadMedia's success and permanent-failure paths so both share the same
 // lock/find/persist bookkeeping.
-func updateCachedMessage(jid string, messages map[string][]chatMessage, id string, mutate func(cm *chatMessage)) (chatMessage, bool) {
+func updateCachedMessage(messages map[string][]chatMessage, jid string, id string, mutate func(cm *chatMessage)) (chatMessage, bool) {
 	messagesMu.Lock()
 	defer messagesMu.Unlock()
 
@@ -806,7 +809,6 @@ func updateCachedMessage(jid string, messages map[string][]chatMessage, id strin
 			return list[i], true
 		}
 	}
-	messages[jid] = list
 	return chatMessage{}, false
 }
 
@@ -821,7 +823,11 @@ func updateCachedMessage(jid string, messages map[string][]chatMessage, id strin
 // type-specific path and clear that type's now-unneeded key material, and a
 // message_update is emitted for it. Meant to run in its own goroutine —
 // image/audio/video/sticker messages show up placeholder-only until this
-// completes.
+// completes. If the download fails with a permanently-failed status (see
+// isPermanentDownloadFailure), applyFailure is called instead — same
+// persist-and-emit bookkeeping, but marking the type's *Failed flag and
+// clearing its *DirectPath so handleOpenChat stops requeueing it. Any other
+// error stays transient and is only logged.
 func downloadMedia(
 	ctx context.Context,
 	client *whatsmeow.Client,
@@ -862,7 +868,7 @@ func downloadMedia(
 			// real-world 404/410s turn out to be transient-in-disguise
 			// (e.g. media re-sent under a new id). Found via on-device
 			// testing 2026-08-06.
-			if updated, found := updateCachedMessage(jid, messages, m.ID, applyFailure); found {
+			if updated, found := updateCachedMessage(messages, jid, m.ID, applyFailure); found {
 				emit(event{Type: "message_update", JID: jid, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
 			}
 		}
@@ -874,7 +880,7 @@ func downloadMedia(
 		return
 	}
 
-	updated, found := updateCachedMessage(jid, messages, m.ID, func(cm *chatMessage) {
+	updated, found := updateCachedMessage(messages, jid, m.ID, func(cm *chatMessage) {
 		apply(cm, path)
 	})
 	if found {
