@@ -430,27 +430,30 @@ func upsertMessage(messages map[string][]chatMessage, jid string, msg chatMessag
 // unsupportedMessageLabel) rather than being dropped — the app shows it as
 // "Unsupported message: <label>" so at least its arrival is visible, even
 // though its content isn't.
-func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, audio *waE2E.AudioMessage, video *waE2E.VideoMessage, sticker *waE2E.StickerMessage, ok bool) {
+func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, audio *waE2E.AudioMessage, video *waE2E.VideoMessage, sticker *waE2E.StickerMessage, ci *waE2E.ContextInfo, ok bool) {
 	for i := 0; i < 4 && m != nil; i++ {
 		switch {
 		case m.GetConversation() != "":
-			return m.GetConversation(), "text", nil, nil, nil, nil, true
+			return m.GetConversation(), "text", nil, nil, nil, nil, nil, true
 		case m.GetExtendedTextMessage() != nil:
-			return m.GetExtendedTextMessage().GetText(), "text", nil, nil, nil, nil, true
+			etm := m.GetExtendedTextMessage()
+			return etm.GetText(), "text", nil, nil, nil, nil, etm.GetContextInfo(), true
 		case m.GetImageMessage() != nil:
 			im := m.GetImageMessage()
-			return im.GetCaption(), "image", im, nil, nil, nil, true
+			return im.GetCaption(), "image", im, nil, nil, nil, im.GetContextInfo(), true
 		case m.GetAudioMessage() != nil:
-			return "", "audio", nil, m.GetAudioMessage(), nil, nil, true
+			am := m.GetAudioMessage()
+			return "", "audio", nil, am, nil, nil, am.GetContextInfo(), true
 		case m.GetVideoMessage() != nil:
 			vm := m.GetVideoMessage()
 			vType := "video"
 			if vm.GetGifPlayback() {
 				vType = "gif"
 			}
-			return vm.GetCaption(), vType, nil, nil, vm, nil, true
+			return vm.GetCaption(), vType, nil, nil, vm, nil, vm.GetContextInfo(), true
 		case m.GetStickerMessage() != nil && !m.GetStickerMessage().GetIsLottie():
-			return "", "sticker", nil, nil, nil, m.GetStickerMessage(), true
+			sm := m.GetStickerMessage()
+			return "", "sticker", nil, nil, nil, sm, sm.GetContextInfo(), true
 		case m.GetEphemeralMessage() != nil:
 			m = m.GetEphemeralMessage().GetMessage()
 		case m.GetViewOnceMessage() != nil:
@@ -461,12 +464,12 @@ func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMes
 			// Internal plumbing (history-sync notifications, app-state key
 			// distribution, ephemeral-setting changes, revokes, ...), never
 			// user-authored content. Drop instead of showing as unsupported.
-			return "", "", nil, nil, nil, nil, false
+			return "", "", nil, nil, nil, nil, nil, false
 		default:
-			return unsupportedMessageLabel(m), "unsupported", nil, nil, nil, nil, true
+			return unsupportedMessageLabel(m), "unsupported", nil, nil, nil, nil, nil, true
 		}
 	}
-	return "", "", nil, nil, nil, nil, false
+	return "", "", nil, nil, nil, nil, nil, false
 }
 
 // unsupportedMessageLabel names whichever content field is populated on m,
@@ -693,7 +696,8 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	if waMsg == nil || key.GetID() == "" {
 		return
 	}
-	text, msgType, img, audio, video, sticker, ok := extractMessage(waMsg)
+	text, msgType, img, audio, video, sticker, ci, ok := extractMessage(waMsg)
+	_ = ci
 	if !ok {
 		return
 	}
@@ -1854,7 +1858,8 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 		emit(event{Type: "chats", Chats: list})
 	}
 
-	text, msgType, img, audio, video, sticker, ok := extractMessage(evt.Message)
+	text, msgType, img, audio, video, sticker, ci, ok := extractMessage(evt.Message)
+	_ = ci
 	if !ok {
 		return
 	}

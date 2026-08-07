@@ -355,7 +355,7 @@ func TestCanonicalizeChatJIDBeforePairing(t *testing.T) {
 func TestExtractMessage(t *testing.T) {
 	t.Run("video message", func(t *testing.T) {
 		msg := &waE2E.Message{VideoMessage: &waE2E.VideoMessage{Caption: proto.String("look")}}
-		text, msgType, _, _, video, sticker, ok := extractMessage(msg)
+		text, msgType, _, _, video, sticker, _, ok := extractMessage(msg)
 		if !ok || msgType != "video" || text != "look" || video == nil || sticker != nil {
 			t.Fatalf("extractMessage() = text=%q type=%q video=%v sticker=%v ok=%v", text, msgType, video, sticker, ok)
 		}
@@ -363,7 +363,7 @@ func TestExtractMessage(t *testing.T) {
 
 	t.Run("gif is a video message with GifPlayback set", func(t *testing.T) {
 		msg := &waE2E.Message{VideoMessage: &waE2E.VideoMessage{GifPlayback: proto.Bool(true)}}
-		_, msgType, _, _, video, _, ok := extractMessage(msg)
+		_, msgType, _, _, video, _, _, ok := extractMessage(msg)
 		if !ok || msgType != "gif" || video == nil {
 			t.Fatalf("extractMessage() = type=%q video=%v ok=%v", msgType, video, ok)
 		}
@@ -371,7 +371,7 @@ func TestExtractMessage(t *testing.T) {
 
 	t.Run("sticker message", func(t *testing.T) {
 		msg := &waE2E.Message{StickerMessage: &waE2E.StickerMessage{IsAnimated: proto.Bool(true)}}
-		_, msgType, _, _, _, sticker, ok := extractMessage(msg)
+		_, msgType, _, _, _, sticker, _, ok := extractMessage(msg)
 		if !ok || msgType != "sticker" || sticker == nil {
 			t.Fatalf("extractMessage() = type=%q sticker=%v ok=%v", msgType, sticker, ok)
 		}
@@ -379,9 +379,26 @@ func TestExtractMessage(t *testing.T) {
 
 	t.Run("lottie sticker falls back to unsupported", func(t *testing.T) {
 		msg := &waE2E.Message{StickerMessage: &waE2E.StickerMessage{IsLottie: proto.Bool(true)}}
-		text, msgType, _, _, _, sticker, ok := extractMessage(msg)
+		text, msgType, _, _, _, sticker, _, ok := extractMessage(msg)
 		if !ok || msgType != "unsupported" || text != "lottie sticker" || sticker != nil {
 			t.Fatalf("extractMessage() = text=%q type=%q sticker=%v ok=%v", text, msgType, sticker, ok)
+		}
+	})
+
+	t.Run("extended text message carries its ContextInfo", func(t *testing.T) {
+		ci := &waE2E.ContextInfo{StanzaID: proto.String("s1")}
+		msg := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String("hi"), ContextInfo: ci}}
+		text, msgType, _, _, _, _, gotCi, ok := extractMessage(msg)
+		if !ok || msgType != "text" || text != "hi" || gotCi.GetStanzaID() != "s1" {
+			t.Fatalf("extractMessage() = text=%q type=%q ci=%v ok=%v", text, msgType, gotCi, ok)
+		}
+	})
+
+	t.Run("plain conversation text carries no ContextInfo", func(t *testing.T) {
+		msg := &waE2E.Message{Conversation: proto.String("hi")}
+		_, msgType, _, _, _, _, gotCi, ok := extractMessage(msg)
+		if !ok || msgType != "text" || gotCi != nil {
+			t.Fatalf("extractMessage() = type=%q ci=%v ok=%v", msgType, gotCi, ok)
 		}
 	})
 }
