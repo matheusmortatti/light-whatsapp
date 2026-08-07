@@ -98,17 +98,11 @@ Commit: `57b06eb`.
 
 ## Known gaps — documented, not fixed
 
-Left as code comments at the relevant call sites (see commit `4b6565c` for
-the first, `57b06eb` for the second) and indexed here for visibility. Both
-are product/UX decisions, not correctness bugs, and out of scope for this
-pass.
-
-- **A failed voice-recording send gives no user-facing feedback.** Even
-  with the new logging from fix #4 above, `RecordingScreen.onSend`
-  (`MainActivity.kt`) still just closes the recording screen silently when
-  `voiceRecorder.stop()` returns `null` — no toast, no error state. The
-  user has no way to tell "it didn't send" from "it sent and I just don't
-  see it yet" without checking logcat.
+Both gaps originally identified in this review (see commit `4b6565c` for
+the first, `57b06eb` for the second) were product/UX decisions, not
+correctness bugs, and out of scope for this pass at the time. Both have
+since been closed — see below. No known gaps remain open from this
+review.
 
 ### Closed since this review
 
@@ -132,6 +126,26 @@ pass.
   retry spam. Other media in the same chat (4 images, 5 audio, 5 gifs, 4
   stickers, 1 video) all still downloaded and rendered normally,
   confirming no regression.
+
+- **A failed voice-recording send gave no user-facing feedback** — was the
+  second bullet above (`RecordingScreen.onSend` in `MainActivity.kt` just
+  closed the recording screen silently when `voiceRecorder.stop()`
+  returned `null`, indistinguishable from a normal cancel without checking
+  logcat). Fixed by the `2026-08-06-media-failure-and-voice-feedback`
+  plan: a new dismissible `RecordingFailedScreen` now shows "Voice message
+  wasn't sent" whenever `stop()` rejects the recording, dismissible via
+  either the top-bar CLOSE icon or hardware/predictive back
+  (`1d74e09`, `ed56276`). Verified live on real LP3 (serial
+  `LP3LHMA551300893`), driven via `adb`/`uiautomator`: a very-short
+  recording (mic-tap immediately followed by SEND-tap) reliably reproduced
+  `MediaRecorder.stop()`'s `RuntimeException: stop failed.`, `adb logcat`
+  showed `VoiceRecorder`'s `Log.w` firing each time, and the "Voice
+  message wasn't sent" screen appeared instead of a silent return to the
+  composer — confirmed on two separate reproductions, dismissed cleanly
+  back to the composer via both the CLOSE icon and the hardware back key
+  (chat stayed open, no exit, no crash). No regression to the happy path:
+  a normal ~3-second recording sent successfully (ack + delivery receipts
+  observed in `adb logcat`) and played back normally in the chat.
 
 ## Also audited, found clean
 
