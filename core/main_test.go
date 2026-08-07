@@ -401,6 +401,38 @@ func TestExtractMessage(t *testing.T) {
 			t.Fatalf("extractMessage() = type=%q ci=%v ok=%v", msgType, gotCi, ok)
 		}
 	})
+
+	t.Run("a genuinely unrecognized content type is still shown as unsupported", func(t *testing.T) {
+		msg := &waE2E.Message{LocationMessage: &waE2E.LocationMessage{}}
+		text, msgType, _, _, _, _, _, ok := extractMessage(msg)
+		if !ok || msgType != "unsupported" || text != "location" {
+			t.Fatalf("extractMessage() = text=%q type=%q ok=%v", text, msgType, ok)
+		}
+	})
+
+	t.Run("a message with only a sender-key-distribution envelope is dropped, not shown as unsupported", func(t *testing.T) {
+		msg := &waE2E.Message{SenderKeyDistributionMessage: &waE2E.SenderKeyDistributionMessage{GroupID: proto.String("g1")}}
+		text, msgType, _, _, _, _, _, ok := extractMessage(msg)
+		if ok || text != "" || msgType != "" {
+			t.Fatalf("extractMessage() = text=%q type=%q ok=%v, want dropped (ok=false)", text, msgType, ok)
+		}
+	})
+
+	t.Run("a message with only MessageContextInfo is dropped, not shown as unsupported", func(t *testing.T) {
+		msg := &waE2E.Message{MessageContextInfo: &waE2E.MessageContextInfo{MessageSecret: []byte("s")}}
+		text, msgType, _, _, _, _, _, ok := extractMessage(msg)
+		if ok || text != "" || msgType != "" {
+			t.Fatalf("extractMessage() = text=%q type=%q ok=%v, want dropped (ok=false)", text, msgType, ok)
+		}
+	})
+
+	t.Run("a fully empty message is dropped, not shown as unsupported", func(t *testing.T) {
+		msg := &waE2E.Message{}
+		text, msgType, _, _, _, _, _, ok := extractMessage(msg)
+		if ok || text != "" || msgType != "" {
+			t.Fatalf("extractMessage() = text=%q type=%q ok=%v, want dropped (ok=false)", text, msgType, ok)
+		}
+	})
 }
 
 func TestWebMessageInfoStatus(t *testing.T) {

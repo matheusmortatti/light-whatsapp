@@ -369,11 +369,13 @@ func messagesFilePath(jid string) string {
 
 // staleUnsupportedLabels are unsupportedMessageLabel outputs that older
 // builds saved to messages/*.json before extractMessage gave these message
-// kinds their own dedicated handling: protocol messages (dropped outright)
-// and reactions (routed to handleReaction instead, see handleMessage). Once
-// cached with msgType "unsupported", they'd otherwise show "Unsupported
-// message: protocol/reaction" forever — loadCachedMessages filters them out.
-var staleUnsupportedLabels = map[string]bool{"protocol": true, "reaction": true}
+// kinds their own dedicated handling: protocol messages (dropped outright),
+// reactions (routed to handleReaction instead, see handleMessage), and
+// content-less envelopes (dropped outright — see unsupportedMessageLabel's
+// hasContent, "message" was its bare fallback label for these). Once cached
+// with msgType "unsupported", they'd otherwise show "Unsupported message:
+// protocol/reaction/message" forever — loadCachedMessages filters them out.
+var staleUnsupportedLabels = map[string]bool{"protocol": true, "reaction": true, "message": true}
 
 func loadCachedMessages(jid string) []chatMessage {
 	data, err := os.ReadFile(messagesFilePath(jid))
@@ -435,12 +437,17 @@ func upsertMessage(messages map[string][]chatMessage, jid string, msg chatMessag
 
 // extractMessage pulls the text (or image) content out of a WhatsApp
 // message, unwrapping the ephemeral/view-once wrappers disappearing
-// messages arrive in. Anything else (video, documents, stickers, polls,
-// reactions, location, ...) the app doesn't render comes back as msgType
-// "unsupported" with a human-readable label in text (see
+// messages arrive in, and returns the message's ContextInfo (see ci) when
+// the matched content type carries one. Anything else (video, documents,
+// stickers, polls, reactions, location, ...) the app doesn't render comes
+// back as msgType "unsupported" with a human-readable label in text (see
 // unsupportedMessageLabel) rather than being dropped — the app shows it as
 // "Unsupported message: <label>" so at least its arrival is visible, even
-// though its content isn't.
+// though its content isn't. A message carrying no populated content field
+// at all (just internal envelope/metadata, e.g. a standalone key
+// distribution or MessageContextInfo-only message) is dropped like
+// ProtocolMessage rather than shown as unsupported — see
+// unsupportedMessageLabel's hasContent.
 func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, audio *waE2E.AudioMessage, video *waE2E.VideoMessage, sticker *waE2E.StickerMessage, ci *waE2E.ContextInfo, ok bool) {
 	for i := 0; i < 4 && m != nil; i++ {
 		switch {
@@ -477,7 +484,15 @@ func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMes
 			// user-authored content. Drop instead of showing as unsupported.
 			return "", "", nil, nil, nil, nil, nil, false
 		default:
-			return unsupportedMessageLabel(m), "unsupported", nil, nil, nil, nil, nil, true
+			label, hasContent := unsupportedMessageLabel(m)
+			if !hasContent {
+				// No real content field populated at all — just an internal
+				// envelope (a standalone key-distribution message, or one
+				// carrying only MessageContextInfo metadata). Same as
+				// ProtocolMessage: drop instead of showing as unsupported.
+				return "", "", nil, nil, nil, nil, nil, false
+			}
+			return label, "unsupported", nil, nil, nil, nil, nil, true
 		}
 	}
 	return "", "", nil, nil, nil, nil, nil, false
@@ -489,18 +504,21 @@ func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMes
 // location, reaction, ...) covering every WhatsApp message type; walking
 // them via reflection here means new message types WhatsApp adds show up
 // with a sensible label automatically, instead of this needing a matching
-// hardcoded case added by hand.
-func unsupportedMessageLabel(m *waE2E.Message) string {
+// hardcoded case added by hand. hasContent is false when m carries no
+// populated field at all (beyond the internal-plumbing ones this always
+// skips) — that's not unsupported content, it's an empty envelope, and the
+// caller should drop it rather than display a label for it.
+func unsupportedMessageLabel(m *waE2E.Message) (label string, hasContent bool) {
 	if m == nil {
-		return "message"
+		return "", false
 	}
 	// WhatsApp sends GIFs as a VideoMessage with GifPlayback set — there's no
 	// separate "gif" content field to catch via the generic field walk below.
 	if vm := m.GetVideoMessage(); vm != nil && vm.GetGifPlayback() {
-		return "gif"
+		return "gif", true
 	}
 	if sm := m.GetStickerMessage(); sm != nil && sm.GetIsLottie() {
-		return "lottie sticker"
+		return "lottie sticker", true
 	}
 	v := reflect.ValueOf(m).Elem()
 	t := v.Type()
@@ -517,9 +535,9 @@ func unsupportedMessageLabel(m *waE2E.Message) string {
 		if fv.Kind() != reflect.Pointer || fv.IsNil() {
 			continue
 		}
-		return humanizeFieldName(strings.TrimSuffix(field.Name, "Message"))
+		return humanizeFieldName(strings.TrimSuffix(field.Name, "Message")), true
 	}
-	return "message"
+	return "", false
 }
 
 // humanizeFieldName turns a Go struct field name like "GroupInvite" or
