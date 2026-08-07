@@ -430,3 +430,35 @@ func TestIsPermanentDownloadFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateCachedMessage(t *testing.T) {
+	messages := map[string][]chatMessage{
+		"jid1": {
+			{ID: "a", Text: "hello"},
+			{ID: "b", Text: "world"},
+		},
+	}
+
+	updated, found := updateCachedMessage("jid1", messages, "b", func(cm *chatMessage) {
+		cm.Text = "edited"
+	})
+	if !found {
+		t.Fatal("expected found=true for existing message")
+	}
+	if updated.Text != "edited" {
+		t.Errorf("updated.Text = %q, want %q", updated.Text, "edited")
+	}
+	if messages["jid1"][1].Text != "edited" {
+		t.Errorf("messages map not updated in place: got %q", messages["jid1"][1].Text)
+	}
+
+	_, found = updateCachedMessage("jid1", messages, "missing-id", func(cm *chatMessage) {})
+	if found {
+		t.Error("expected found=false for missing message id")
+	}
+
+	_, found = updateCachedMessage("missing-jid", messages, "a", func(cm *chatMessage) {})
+	if found {
+		t.Error("expected found=false for missing jid")
+	}
+}

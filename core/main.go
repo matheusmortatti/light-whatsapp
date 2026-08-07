@@ -165,6 +165,18 @@ type chatMessage struct {
 	StickerFileEncSHA256 []byte `json:"sticker_file_enc_sha256,omitempty"`
 	StickerMimetype      string `json:"sticker_mimetype,omitempty"`
 
+	// Set once a permanent download failure is classified (see
+	// isPermanentDownloadFailure) — a 403/404/410 on this type's media.
+	// handleOpenChat stops requeueing a download for this message once its
+	// type's *Failed is true (its *DirectPath is cleared alongside it, which
+	// is what handleOpenChat actually checks). The app renders a terminal
+	// "unavailable" label instead of retrying. No retry path exists yet for
+	// the user to clear this — see the comment in downloadMedia.
+	ImageFailed   bool `json:"image_failed,omitempty"`
+	AudioFailed   bool `json:"audio_failed,omitempty"`
+	VideoFailed   bool `json:"video_failed,omitempty"`
+	StickerFailed bool `json:"sticker_failed,omitempty"`
+
 	// Reactions on this message (see handleReaction and handleSendReaction),
 	// populated live whether the message is ours or someone else's.
 	Reactions []chatReaction `json:"reactions,omitempty"`
@@ -773,6 +785,31 @@ func isPermanentDownloadFailure(err error) bool {
 	}
 }
 
+// updateCachedMessage finds the message with the given id in messages[jid],
+// applies mutate to it, persists the updated list via saveMessages, and
+// returns the mutated message plus whether it was found. Used by
+// downloadMedia's success and permanent-failure paths so both share the same
+// lock/find/persist bookkeeping.
+func updateCachedMessage(jid string, messages map[string][]chatMessage, id string, mutate func(cm *chatMessage)) (chatMessage, bool) {
+	messagesMu.Lock()
+	defer messagesMu.Unlock()
+
+	list, ok := messages[jid]
+	if !ok {
+		return chatMessage{}, false
+	}
+	for i, cur := range list {
+		if cur.ID == id {
+			mutate(&list[i])
+			messages[jid] = list
+			saveMessages(jid, list)
+			return list[i], true
+		}
+	}
+	messages[jid] = list
+	return chatMessage{}, false
+}
+
 // downloadMedia fetches one message's media, streaming straight to disk via
 // DownloadMediaWithPathToFile rather than buffering the whole decrypted
 // file in memory first — core runs on the Light Phone III itself, and a
@@ -831,24 +868,9 @@ func downloadMedia(
 		return
 	}
 
-	messagesMu.Lock()
-	list, ok := messages[jid]
-	var updated chatMessage
-	found := false
-	if ok {
-		for i, cur := range list {
-			if cur.ID == m.ID {
-				apply(&list[i], path)
-				updated = list[i]
-				found = true
-				break
-			}
-		}
-		messages[jid] = list
-		saveMessages(jid, list)
-	}
-	messagesMu.Unlock()
-
+	updated, found := updateCachedMessage(jid, messages, m.ID, func(cm *chatMessage) {
+		apply(cm, path)
+	})
 	if found {
 		emit(event{Type: "message_update", JID: jid, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
 	}
