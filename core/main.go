@@ -183,6 +183,17 @@ type chatMessage struct {
 	// Reactions on this message (see handleReaction and handleSendReaction),
 	// populated live whether the message is ours or someone else's.
 	Reactions []chatReaction `json:"reactions,omitempty"`
+
+	// Set only when this message is a reply — see setQuotedFields. QuotedID
+	// absent/empty means "not a reply". QuotedType uses the same vocabulary
+	// as Type, or "unsupported" if the quoted content couldn't be decoded
+	// (e.g. no payload embedded in ContextInfo). QuotedText is untruncated,
+	// same as Text — truncation is a display concern.
+	QuotedID         string `json:"quoted_id,omitempty"`
+	QuotedFromMe     bool   `json:"quoted_from_me,omitempty"`
+	QuotedSenderName string `json:"quoted_sender_name,omitempty"`
+	QuotedType       string `json:"quoted_type,omitempty"`
+	QuotedText       string `json:"quoted_text,omitempty"`
 }
 
 // chatReaction is one person's current reaction to a message, keyed by
@@ -430,27 +441,30 @@ func upsertMessage(messages map[string][]chatMessage, jid string, msg chatMessag
 // unsupportedMessageLabel) rather than being dropped — the app shows it as
 // "Unsupported message: <label>" so at least its arrival is visible, even
 // though its content isn't.
-func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, audio *waE2E.AudioMessage, video *waE2E.VideoMessage, sticker *waE2E.StickerMessage, ok bool) {
+func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, audio *waE2E.AudioMessage, video *waE2E.VideoMessage, sticker *waE2E.StickerMessage, ci *waE2E.ContextInfo, ok bool) {
 	for i := 0; i < 4 && m != nil; i++ {
 		switch {
 		case m.GetConversation() != "":
-			return m.GetConversation(), "text", nil, nil, nil, nil, true
+			return m.GetConversation(), "text", nil, nil, nil, nil, nil, true
 		case m.GetExtendedTextMessage() != nil:
-			return m.GetExtendedTextMessage().GetText(), "text", nil, nil, nil, nil, true
+			etm := m.GetExtendedTextMessage()
+			return etm.GetText(), "text", nil, nil, nil, nil, etm.GetContextInfo(), true
 		case m.GetImageMessage() != nil:
 			im := m.GetImageMessage()
-			return im.GetCaption(), "image", im, nil, nil, nil, true
+			return im.GetCaption(), "image", im, nil, nil, nil, im.GetContextInfo(), true
 		case m.GetAudioMessage() != nil:
-			return "", "audio", nil, m.GetAudioMessage(), nil, nil, true
+			am := m.GetAudioMessage()
+			return "", "audio", nil, am, nil, nil, am.GetContextInfo(), true
 		case m.GetVideoMessage() != nil:
 			vm := m.GetVideoMessage()
 			vType := "video"
 			if vm.GetGifPlayback() {
 				vType = "gif"
 			}
-			return vm.GetCaption(), vType, nil, nil, vm, nil, true
+			return vm.GetCaption(), vType, nil, nil, vm, nil, vm.GetContextInfo(), true
 		case m.GetStickerMessage() != nil && !m.GetStickerMessage().GetIsLottie():
-			return "", "sticker", nil, nil, nil, m.GetStickerMessage(), true
+			sm := m.GetStickerMessage()
+			return "", "sticker", nil, nil, nil, sm, sm.GetContextInfo(), true
 		case m.GetEphemeralMessage() != nil:
 			m = m.GetEphemeralMessage().GetMessage()
 		case m.GetViewOnceMessage() != nil:
@@ -461,12 +475,12 @@ func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMes
 			// Internal plumbing (history-sync notifications, app-state key
 			// distribution, ephemeral-setting changes, revokes, ...), never
 			// user-authored content. Drop instead of showing as unsupported.
-			return "", "", nil, nil, nil, nil, false
+			return "", "", nil, nil, nil, nil, nil, false
 		default:
-			return unsupportedMessageLabel(m), "unsupported", nil, nil, nil, nil, true
+			return unsupportedMessageLabel(m), "unsupported", nil, nil, nil, nil, nil, true
 		}
 	}
-	return "", "", nil, nil, nil, nil, false
+	return "", "", nil, nil, nil, nil, nil, false
 }
 
 // unsupportedMessageLabel names whichever content field is populated on m,
@@ -598,8 +612,14 @@ func invalidateMentionName(user string) {
 	mentionNameMu.Unlock()
 }
 
-// lookupMentionName is resolveMentions' uncached lookup — see its comment
-// for why LID is tried first, then phone number, then self push name.
+// isSelfUser reports whether user (a bare JID user part — digits for a
+// phone-number JID, an opaque id for a lid) refers to this device's own
+// account, checked against both its phone-number and lid identities — the
+// same LID/PN duality resolveMentions navigates for @-mentions.
+func isSelfUser(client *whatsmeow.Client, user string) bool {
+	return (client.Store.ID != nil && user == client.Store.ID.User) || user == client.Store.GetLID().User
+}
+
 func lookupMentionName(ctx context.Context, client *whatsmeow.Client, user string) string {
 	if name := contactName(ctx, client, types.NewJID(user, types.HiddenUserServer)); name != "" {
 		return name
@@ -607,7 +627,7 @@ func lookupMentionName(ctx context.Context, client *whatsmeow.Client, user strin
 	if name := contactName(ctx, client, types.NewJID(user, types.DefaultUserServer)); name != "" {
 		return name
 	}
-	if client.Store.PushName != "" && ((client.Store.ID != nil && user == client.Store.ID.User) || user == client.Store.GetLID().User) {
+	if client.Store.PushName != "" && isSelfUser(client, user) {
 		return client.Store.PushName
 	}
 	return ""
@@ -625,6 +645,7 @@ func resolveMentionsInList(ctx context.Context, client *whatsmeow.Client, list [
 	out := make([]chatMessage, len(list))
 	for i, m := range list {
 		m.Text = resolveMentions(ctx, client, m.Text)
+		m.QuotedText = resolveMentions(ctx, client, m.QuotedText)
 		out[i] = m
 	}
 	return out
@@ -680,6 +701,43 @@ func setStickerFields(cm *chatMessage, s *waE2E.StickerMessage) {
 	cm.StickerIsAnimated = s.GetIsAnimated()
 }
 
+// setQuotedFields fills in cm's reply-preview fields from ci, the
+// ContextInfo of whichever content field extractMessage matched — a no-op
+// if ci is nil or carries no stanza ID (i.e. this message isn't a reply).
+// The quoted content itself is decoded via a recursive extractMessage call
+// on ci.GetQuotedMessage(), reusing all of its existing type handling; a
+// nil/undecodable quoted payload (e.g. a quoted protocol message) falls
+// back to QuotedType "unsupported" with no text, the same label
+// extractMessage itself would give an unsupported top-level message.
+func setQuotedFields(ctx context.Context, client *whatsmeow.Client, cm *chatMessage, ci *waE2E.ContextInfo) {
+	if ci == nil || ci.GetStanzaID() == "" {
+		return
+	}
+	cm.QuotedID = ci.GetStanzaID()
+
+	qText, qType, _, _, _, _, _, ok := extractMessage(ci.GetQuotedMessage())
+	if ok {
+		cm.QuotedType = qType
+		cm.QuotedText = qText
+	} else {
+		cm.QuotedType = "unsupported"
+	}
+
+	participant := ci.GetParticipant()
+	if participant == "" {
+		return
+	}
+	pjid, err := types.ParseJID(participant)
+	if err != nil {
+		return
+	}
+	if isSelfUser(client, pjid.User) {
+		cm.QuotedFromMe = true
+	} else {
+		cm.QuotedSenderName = cachedMentionName(ctx, client, pjid.User)
+	}
+}
+
 // extractHistoryMessage pulls one history-sync message into messages, if it's
 // a type the app renders (see extractMessage). Image media is noted but not
 // downloaded here — history sync can carry years of backlog, so downloading
@@ -693,7 +751,7 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	if waMsg == nil || key.GetID() == "" {
 		return
 	}
-	text, msgType, img, audio, video, sticker, ok := extractMessage(waMsg)
+	text, msgType, img, audio, video, sticker, ci, ok := extractMessage(waMsg)
 	if !ok {
 		return
 	}
@@ -717,6 +775,7 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	if msgType == "sticker" && sticker != nil {
 		setStickerFields(&cm, sticker)
 	}
+	setQuotedFields(ctx, client, &cm, ci)
 	// A message we sent from a different linked device (e.g. the phone)
 	// arrives here with no status of its own — handleSendMessage/
 	// handleSendAudio only stamp "sent" for messages sent through *this*
@@ -1854,7 +1913,7 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 		emit(event{Type: "chats", Chats: list})
 	}
 
-	text, msgType, img, audio, video, sticker, ok := extractMessage(evt.Message)
+	text, msgType, img, audio, video, sticker, ci, ok := extractMessage(evt.Message)
 	if !ok {
 		return
 	}
@@ -1877,6 +1936,7 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	if msgType == "sticker" && sticker != nil {
 		setStickerFields(&cm, sticker)
 	}
+	setQuotedFields(ctx, client, &cm, ci)
 	// Same gap as extractHistoryMessage: a message sent from another linked
 	// device arrives here live with no status. Unlike history sync, a live
 	// *events.Message carries no delivery/read state of its own — but its

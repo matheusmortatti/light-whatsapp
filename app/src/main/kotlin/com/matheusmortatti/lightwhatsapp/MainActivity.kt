@@ -826,14 +826,20 @@ private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "
 // "unavailable" labels (e.g. "[Photo unavailable]") — a perma-failed photo
 // still shows the plain "[Photo]" preview here; only the chat row itself
 // distinguishes the failure state.
-private fun messagePreviewText(message: Message): String = when (message.type) {
-    "image" -> message.text.ifBlank { "[Photo]" }
+private fun messagePreviewText(message: Message): String = messagePreviewText(message.type, message.text)
+
+// Same placeholder logic as the Message overload above, but usable on a
+// synthetic (type, text) pair — specifically MessageRow's quoted-reply
+// preview, which has a quotedType/quotedText but no full Message for the
+// message it's quoting.
+private fun messagePreviewText(type: String, text: String): String = when (type) {
+    "image" -> text.ifBlank { "[Photo]" }
     "sticker" -> "[Sticker]"
-    "video" -> message.text.ifBlank { "[Video]" }
-    "gif" -> message.text.ifBlank { "[GIF]" }
+    "video" -> text.ifBlank { "[Video]" }
+    "gif" -> text.ifBlank { "[GIF]" }
     "audio" -> "[Voice message]"
     "unsupported" -> "[Unsupported message]"
-    else -> message.text
+    else -> text
 }
 
 // WhatsApp reactions can arrive from different clients with or without a
@@ -963,6 +969,28 @@ private fun MessageRow(
                     ChatMetaText(text = " · $statusLabel")
                 }
             }
+        }
+
+        // Quote preview for a reply — inert (no tap-to-jump), inside the
+        // row's existing onReact click target. Rendered below the row's own
+        // header (if shown) and above its body, matching where a reply's
+        // quote reads naturally: who/when this message is, what it's
+        // replying to, then its own content.
+        if (message.quotedType != null) {
+            val quotedSenderLabel = if (message.quotedFromMe) {
+                "Replying to you"
+            } else {
+                "Replying to " + (message.quotedSenderName ?: chatName)
+            }
+            ChatMetaText(text = quotedSenderLabel)
+            MessageBodyText(
+                text = messagePreviewText(message.quotedType, message.quotedText),
+                lighten = true,
+                align = bodyAlign,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
 
         when (message.type) {
@@ -1143,6 +1171,8 @@ private fun MessageBodyText(
     modifier: Modifier = Modifier,
     lighten: Boolean = false,
     align: TextAlign = TextAlign.Start,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip,
 ) {
     val style = scaledStyle(LightThemeTokens.typography.copy, MESSAGE_FONT_SCALE, MESSAGE_LINE_HEIGHT_MULTIPLIER)
         .copy(textAlign = align)
@@ -1151,6 +1181,8 @@ private fun MessageBodyText(
         modifier = modifier,
         color = if (lighten) LightThemeTokens.colors.contentSecondary else LightThemeTokens.colors.content,
         style = style,
+        maxLines = maxLines,
+        overflow = overflow,
     )
 }
 

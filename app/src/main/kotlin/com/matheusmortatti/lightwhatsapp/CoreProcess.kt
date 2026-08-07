@@ -64,6 +64,15 @@ data class Message(
     // Reactions on this message — see core/main.go's chatMessage.Reactions.
     // Populated whether the message is ours or theirs.
     val reactions: List<Reaction>,
+    // Set only when this message is a reply — see core/main.go's
+    // chatMessage.QuotedID. quotedType == null means "not a reply".
+    // quotedSenderName is null when quotedFromMe is true, or when the
+    // quoting participant's name isn't known yet.
+    val quotedId: String?,
+    val quotedFromMe: Boolean,
+    val quotedSenderName: String?,
+    val quotedType: String?,
+    val quotedText: String,
 )
 
 // One person's current reaction to a message — see core/main.go's chatReaction.
@@ -282,6 +291,11 @@ class CoreProcess(private val context: Context) {
                 videoFailed = o.optBoolean("video_failed", false),
                 stickerFailed = o.optBoolean("sticker_failed", false),
                 reactions = parseReactions(o.optJSONArray("reactions")),
+                quotedId = o.optString("quoted_id").ifBlank { null },
+                quotedFromMe = o.optBoolean("quoted_from_me", false),
+                quotedSenderName = o.optString("quoted_sender_name").ifBlank { null },
+                quotedType = o.optString("quoted_type").ifBlank { null },
+                quotedText = o.optString("quoted_text"),
             )
         }
     }
