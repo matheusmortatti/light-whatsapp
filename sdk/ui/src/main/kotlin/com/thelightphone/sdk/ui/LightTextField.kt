@@ -22,7 +22,7 @@ private const val VALUE_TO_UNDERLINE_GAP_GRID_UNITS = 0.25f
  */
 @Composable
 fun LightTextField(
-    label: String,
+    label: String?,
     value: String,
     placeholder: String,
     onClick: () -> Unit,
@@ -30,11 +30,13 @@ fun LightTextField(
 ) {
     val colors = LightThemeTokens.colors
     Column(modifier = modifier.fillMaxWidth()) {
-        LightText(
-            text = label,
-            variant = LightTextVariant.Detail,
-            modifier = Modifier.padding(top = 0.5f.gridUnitsAsDp()),
-        )
+        if (label != null) {
+            LightText(
+                text = label,
+                variant = LightTextVariant.Detail,
+                modifier = Modifier.padding(top = 0.5f.gridUnitsAsDp()),
+            )
+        }
         val isPlaceholder = value.isBlank()
         Column(
             modifier = Modifier

@@ -605,7 +605,7 @@ private fun ChatDetailScreen(
                 .padding(horizontal = 24.dp, vertical = 4.dp),
         ) {
             LightTextField(
-                label = "Message",
+                label = null,
                 value = "",
                 placeholder = "Tap to type a message",
                 onClick = { composing = true },
