@@ -506,3 +506,126 @@ func TestApplyImageFailureClearsDownloadState(t *testing.T) {
 		t.Error("applyImageFailure must not touch unrelated fields")
 	}
 }
+
+// fakeContactStore is a minimal store.ContactStore test double: GetContact
+// reports a fixed name for one specific JID and "not found" for everything
+// else, letting TestSetQuotedFields exercise the real contact-lookup path
+// (cachedMentionName -> contactName -> client.Store.Contacts.GetContact)
+// without a real SQLite-backed store.
+type fakeContactStore struct {
+	known types.JID
+	name  string
+}
+
+func (f fakeContactStore) PutPushName(ctx context.Context, user types.JID, pushName string) (bool, string, error) {
+	return false, "", nil
+}
+func (f fakeContactStore) PutBusinessName(ctx context.Context, user types.JID, businessName string) (bool, string, error) {
+	return false, "", nil
+}
+func (f fakeContactStore) PutContactName(ctx context.Context, user types.JID, fullName, firstName string) error {
+	return nil
+}
+func (f fakeContactStore) PutAllContactNames(ctx context.Context, contacts []store.ContactEntry) error {
+	return nil
+}
+func (f fakeContactStore) PutManyRedactedPhones(ctx context.Context, entries []store.RedactedPhoneEntry) error {
+	return nil
+}
+func (f fakeContactStore) GetContact(ctx context.Context, user types.JID) (types.ContactInfo, error) {
+	if user == f.known {
+		return types.ContactInfo{Found: true, FullName: f.name}, nil
+	}
+	return types.ContactInfo{Found: false}, nil
+}
+func (f fakeContactStore) GetAllContacts(ctx context.Context) (map[types.JID]types.ContactInfo, error) {
+	return nil, nil
+}
+
+func TestSetQuotedFields(t *testing.T) {
+	ownJID := types.NewJID("111", types.DefaultUserServer)
+	otherJID := types.NewJID("222", types.DefaultUserServer)
+
+	newClient := func() *whatsmeow.Client {
+		return whatsmeow.NewClient(&store.Device{
+			ID:       &ownJID,
+			Contacts: fakeContactStore{known: types.NewJID("222", types.HiddenUserServer), name: "Alice"},
+		}, waLog.Noop)
+	}
+
+	t.Run("nil ContextInfo is a no-op", func(t *testing.T) {
+		cm := chatMessage{ID: "m1"}
+		setQuotedFields(context.Background(), newClient(), &cm, nil)
+		if cm.QuotedID != "" || cm.QuotedType != "" {
+			t.Fatalf("expected no quoted fields set, got %+v", cm)
+		}
+	})
+
+	t.Run("blank stanza id is a no-op", func(t *testing.T) {
+		cm := chatMessage{ID: "m1"}
+		setQuotedFields(context.Background(), newClient(), &cm, &waE2E.ContextInfo{})
+		if cm.QuotedID != "" || cm.QuotedType != "" {
+			t.Fatalf("expected no quoted fields set, got %+v", cm)
+		}
+	})
+
+	t.Run("reply to our own text message sets QuotedFromMe", func(t *testing.T) {
+		cm := chatMessage{ID: "m1"}
+		ci := &waE2E.ContextInfo{
+			StanzaID:      proto.String("orig1"),
+			Participant:   proto.String(ownJID.String()),
+			QuotedMessage: &waE2E.Message{Conversation: proto.String("Sure, sounds good")},
+		}
+		setQuotedFields(context.Background(), newClient(), &cm, ci)
+		if cm.QuotedID != "orig1" || !cm.QuotedFromMe || cm.QuotedSenderName != "" {
+			t.Fatalf("got %+v", cm)
+		}
+		if cm.QuotedType != "text" || cm.QuotedText != "Sure, sounds good" {
+			t.Fatalf("got QuotedType=%q QuotedText=%q", cm.QuotedType, cm.QuotedText)
+		}
+	})
+
+	t.Run("reply to someone else's message resolves their name via the contact store", func(t *testing.T) {
+		cm := chatMessage{ID: "m1"}
+		ci := &waE2E.ContextInfo{
+			StanzaID:      proto.String("orig2"),
+			Participant:   proto.String(otherJID.String()),
+			QuotedMessage: &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Caption: proto.String("nice")}},
+		}
+		setQuotedFields(context.Background(), newClient(), &cm, ci)
+		if cm.QuotedFromMe {
+			t.Fatalf("expected QuotedFromMe=false, got %+v", cm)
+		}
+		if cm.QuotedSenderName != "Alice" {
+			t.Fatalf("expected QuotedSenderName=Alice, got %q", cm.QuotedSenderName)
+		}
+		if cm.QuotedType != "image" || cm.QuotedText != "nice" {
+			t.Fatalf("got QuotedType=%q QuotedText=%q", cm.QuotedType, cm.QuotedText)
+		}
+	})
+
+	t.Run("quoted message with no embedded payload falls back to unsupported", func(t *testing.T) {
+		cm := chatMessage{ID: "m1"}
+		ci := &waE2E.ContextInfo{
+			StanzaID:    proto.String("orig3"),
+			Participant: proto.String(ownJID.String()),
+		}
+		setQuotedFields(context.Background(), newClient(), &cm, ci)
+		if cm.QuotedType != "unsupported" || cm.QuotedText != "" {
+			t.Fatalf("got QuotedType=%q QuotedText=%q", cm.QuotedType, cm.QuotedText)
+		}
+	})
+
+	t.Run("quoted protocol message falls back to unsupported", func(t *testing.T) {
+		cm := chatMessage{ID: "m1"}
+		ci := &waE2E.ContextInfo{
+			StanzaID:      proto.String("orig4"),
+			Participant:   proto.String(ownJID.String()),
+			QuotedMessage: &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{}},
+		}
+		setQuotedFields(context.Background(), newClient(), &cm, ci)
+		if cm.QuotedType != "unsupported" {
+			t.Fatalf("got QuotedType=%q", cm.QuotedType)
+		}
+	})
+}

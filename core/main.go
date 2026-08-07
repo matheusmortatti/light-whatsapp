@@ -183,6 +183,17 @@ type chatMessage struct {
 	// Reactions on this message (see handleReaction and handleSendReaction),
 	// populated live whether the message is ours or someone else's.
 	Reactions []chatReaction `json:"reactions,omitempty"`
+
+	// Set only when this message is a reply — see setQuotedFields. QuotedID
+	// absent/empty means "not a reply". QuotedType uses the same vocabulary
+	// as Type, or "unsupported" if the quoted content couldn't be decoded
+	// (e.g. no payload embedded in ContextInfo). QuotedText is untruncated,
+	// same as Text — truncation is a display concern.
+	QuotedID         string `json:"quoted_id,omitempty"`
+	QuotedFromMe     bool   `json:"quoted_from_me,omitempty"`
+	QuotedSenderName string `json:"quoted_sender_name,omitempty"`
+	QuotedType       string `json:"quoted_type,omitempty"`
+	QuotedText       string `json:"quoted_text,omitempty"`
 }
 
 // chatReaction is one person's current reaction to a message, keyed by
@@ -601,8 +612,14 @@ func invalidateMentionName(user string) {
 	mentionNameMu.Unlock()
 }
 
-// lookupMentionName is resolveMentions' uncached lookup — see its comment
-// for why LID is tried first, then phone number, then self push name.
+// isSelfUser reports whether user (a bare JID user part — digits for a
+// phone-number JID, an opaque id for a lid) refers to this device's own
+// account, checked against both its phone-number and lid identities — the
+// same LID/PN duality resolveMentions navigates for @-mentions.
+func isSelfUser(client *whatsmeow.Client, user string) bool {
+	return (client.Store.ID != nil && user == client.Store.ID.User) || user == client.Store.GetLID().User
+}
+
 func lookupMentionName(ctx context.Context, client *whatsmeow.Client, user string) string {
 	if name := contactName(ctx, client, types.NewJID(user, types.HiddenUserServer)); name != "" {
 		return name
@@ -610,7 +627,7 @@ func lookupMentionName(ctx context.Context, client *whatsmeow.Client, user strin
 	if name := contactName(ctx, client, types.NewJID(user, types.DefaultUserServer)); name != "" {
 		return name
 	}
-	if client.Store.PushName != "" && ((client.Store.ID != nil && user == client.Store.ID.User) || user == client.Store.GetLID().User) {
+	if client.Store.PushName != "" && isSelfUser(client, user) {
 		return client.Store.PushName
 	}
 	return ""
@@ -681,6 +698,43 @@ func setStickerFields(cm *chatMessage, s *waE2E.StickerMessage) {
 	cm.StickerFileEncSHA256 = s.GetFileEncSHA256()
 	cm.StickerMimetype = s.GetMimetype()
 	cm.StickerIsAnimated = s.GetIsAnimated()
+}
+
+// setQuotedFields fills in cm's reply-preview fields from ci, the
+// ContextInfo of whichever content field extractMessage matched — a no-op
+// if ci is nil or carries no stanza ID (i.e. this message isn't a reply).
+// The quoted content itself is decoded via a recursive extractMessage call
+// on ci.GetQuotedMessage(), reusing all of its existing type handling; a
+// nil/undecodable quoted payload (e.g. a quoted protocol message) falls
+// back to QuotedType "unsupported" with no text, the same label
+// extractMessage itself would give an unsupported top-level message.
+func setQuotedFields(ctx context.Context, client *whatsmeow.Client, cm *chatMessage, ci *waE2E.ContextInfo) {
+	if ci == nil || ci.GetStanzaID() == "" {
+		return
+	}
+	cm.QuotedID = ci.GetStanzaID()
+
+	qText, qType, _, _, _, _, _, ok := extractMessage(ci.GetQuotedMessage())
+	if ok {
+		cm.QuotedType = qType
+		cm.QuotedText = qText
+	} else {
+		cm.QuotedType = "unsupported"
+	}
+
+	participant := ci.GetParticipant()
+	if participant == "" {
+		return
+	}
+	pjid, err := types.ParseJID(participant)
+	if err != nil {
+		return
+	}
+	if isSelfUser(client, pjid.User) {
+		cm.QuotedFromMe = true
+	} else {
+		cm.QuotedSenderName = cachedMentionName(ctx, client, pjid.User)
+	}
 }
 
 // extractHistoryMessage pulls one history-sync message into messages, if it's
