@@ -93,6 +93,9 @@ class LightActivity internal constructor() : ComponentActivity() {
         }
         super.onCreate(savedInstanceState)
 
+        // Avoids a stale-content flash when resuming from a stopped task (if false)
+        setRecentsScreenshotEnabled(LightSdkRegistry.entryPoint?.enableRecentsScreenshots == true)
+
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         controller.hide(WindowInsetsCompat.Type.systemBars())
@@ -227,6 +230,7 @@ class SealedLightContext(internal val androidContext: Context) {
     val dataStore: DataStore<Preferences> by lazy{ androidContext.dataStore }
     val filesDir: File by lazy{ androidContext.filesDir }
     val fileShare: LightFileShare by lazy { LightFileShare(androidContext) }
+    val connectivity: LightConnectivity by lazy { LightConnectivity(androidContext) }
     fun readAsset(path: String): ByteArray = androidContext.assets.open(path).use { it.readBytes() }
 }
 /**
