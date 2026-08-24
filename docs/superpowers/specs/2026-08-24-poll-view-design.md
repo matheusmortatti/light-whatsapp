@@ -41,6 +41,18 @@ from this app deferred as later, separately-scoped features.
 - A vote for a poll this app doesn't currently have cached (older than
   `maxMessagesPerChat`, or a chat never opened) — silently dropped,
   same as an unmatched reaction/receipt today.
+- Backfilling vote tallies for polls pulled in via history sync.
+  WhatsApp delivers historical reactions/votes as side-channel fields
+  on `waWeb.WebMessageInfo` (`Reactions []*Reaction` field 41,
+  `PollUpdates []*PollUpdate` field 45) rather than as `.Message`
+  content — `extractHistoryMessage` doesn't read either field today,
+  so historical *reactions* already don't show up after a fresh
+  history sync (a pre-existing gap, not something this feature
+  introduces). Poll votes get the same gap for v1: a poll pulled in by
+  history sync renders with its question/options but a 0 tally until a
+  vote arrives live from that point forward. Backfilling both via
+  `WebMessageInfo.GetReactions()`/`GetPollUpdates()` is a fix that
+  benefits reactions too and should be scoped as its own feature.
 
 ## Design
 
@@ -103,9 +115,14 @@ from this app deferred as later, separately-scoped features.
   same per-type dispatch already there for image/audio/video/sticker.
 - `extractHistoryMessage` gains the matching poll-creation branch (same
   all-variants check) so backfilled polls parse the same way live ones
-  do; history-synced votes flow through the same
-  `handlePollVote`-equivalent path history sync already uses for
-  reactions.
+  do, with a 0 tally until a live vote arrives (see Non-goals —
+  historical vote backfill is out of scope, matching the existing gap
+  for historical reactions).
+- Doc comments referencing the old scope need updating: `chatMessage`'s
+  comment currently reads "Only text, image, and audio messages are
+  represented — everything else (documents, polls, ...) is dropped" —
+  drop "polls" from that list. The `command` struct's comment doesn't
+  need a change (no new command is added by this feature).
 
 ### `app/` (`CoreProcess.kt`, `MainActivity.kt`)
 
