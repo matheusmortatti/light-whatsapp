@@ -1097,13 +1097,15 @@ private fun MessageRow(
 
             "poll" -> {
                 MessageBodyText(text = message.text, align = bodyAlign)
-                MessageBodyText(
-                    text = formatPollOptions(message.pollOptions, message.pollVotes),
-                    lighten = true,
-                    align = bodyAlign,
-                )
-                val voterCount = message.pollVotes.size
-                ChatMetaText(text = if (voterCount == 1) "1 vote" else "$voterCount votes")
+                if (message.pollOptions.isNotEmpty()) {
+                    MessageBodyText(
+                        text = formatPollOptions(message.pollOptions, message.pollVotes),
+                        lighten = true,
+                        align = bodyAlign,
+                    )
+                    val voterCount = message.pollVotes.size
+                    ChatMetaText(text = if (voterCount == 1) "1 vote" else "$voterCount votes")
+                }
             }
 
             "unsupported" -> MessageBodyText(
@@ -1129,6 +1131,8 @@ private fun formatReactions(reactions: List<Reaction>): String =
         if (count > 1) "$emoji×$count" else emoji
     }
 
+private const val POLL_BAR_SEGMENTS = 5
+
 // Renders each poll option on its own line with a 5-segment bar scaled to
 // the highest-voted option, e.g.:
 //   ▸ Pepperoni  ■■■■□ 4
@@ -1137,8 +1141,6 @@ private fun formatReactions(reactions: List<Reaction>): String =
 // poll lets one voter count toward several options at once) — who voted for
 // what isn't shown, matching the approved tally format (counts + bar, not
 // per-voter identity).
-private const val POLL_BAR_SEGMENTS = 5
-
 private fun formatPollOptions(options: List<String>, votes: List<PollVote>): String {
     if (options.isEmpty()) return ""
     val counts = IntArray(options.size)

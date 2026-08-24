@@ -106,7 +106,7 @@ type command struct {
 // everything else (documents, ...) is dropped during extraction, per the
 // app's scope. Reactions aren't their own chatMessage — see Reactions and
 // handleReaction. Poll votes aren't their own chatMessage either — see
-// PollVotes and handlePollVote (added in a later task).
+// PollVotes and handlePollVote.
 type chatMessage struct {
 	ID        string `json:"id"`
 	Timestamp int64  `json:"timestamp"`
@@ -185,7 +185,7 @@ type chatMessage struct {
 
 	// Question/options for a poll message — see setPollFields. Tallies
 	// aren't stored as a precomputed count; the app derives them
-	// client-side from PollVotes (added in a later task), the same way it
+	// client-side from PollVotes, the same way it
 	// already derives reaction counts from Reactions.
 	PollOptions         []string `json:"poll_options,omitempty"`
 	PollSelectableCount int      `json:"poll_selectable_count,omitempty"`
@@ -193,7 +193,10 @@ type chatMessage struct {
 	// Votes on this poll message — see handlePollVote. Populated live
 	// whether the poll is ours or someone else's. Tallies are derived
 	// client-side (app-side), the same way reaction counts are derived
-	// from Reactions rather than precomputed here.
+	// from Reactions rather than precomputed here. Note a history-sync
+	// replay of this poll's creation message (see upsertMessage) can
+	// currently reset this to empty, the same pre-existing cache-replay
+	// gap ImageFailed documents for itself.
 	PollVotes []chatPollVote `json:"poll_votes,omitempty"`
 
 	// Reactions on this message (see handleReaction and handleSendReaction),
@@ -400,12 +403,24 @@ func messagesFilePath(jid string) string {
 // staleUnsupportedLabels are unsupportedMessageLabel outputs that older
 // builds saved to messages/*.json before extractMessage gave these message
 // kinds their own dedicated handling: protocol messages (dropped outright),
-// reactions (routed to handleReaction instead, see handleMessage), and
-// content-less envelopes (dropped outright — see unsupportedMessageLabel's
-// hasContent, "message" was its bare fallback label for these). Once cached
-// with msgType "unsupported", they'd otherwise show "Unsupported message:
-// protocol/reaction/message" forever — loadCachedMessages filters them out.
-var staleUnsupportedLabels = map[string]bool{"protocol": true, "reaction": true, "message": true}
+// reactions (routed to handleReaction instead, see handleMessage), polls
+// (routed to setPollFields/handlePollVote instead, see extractMessage and
+// handleMessage), and content-less envelopes (dropped outright — see
+// unsupportedMessageLabel's hasContent, "message" was its bare fallback
+// label for these). Once cached with msgType "unsupported", they'd
+// otherwise show "Unsupported message: protocol/reaction/poll .../message"
+// forever — loadCachedMessages filters them out.
+var staleUnsupportedLabels = map[string]bool{
+	"protocol":                 true,
+	"reaction":                 true,
+	"message":                  true,
+	"poll creation":            true,
+	"poll creation message v2": true,
+	"poll creation message v3": true,
+	"poll creation message v5": true,
+	"poll creation message v6": true,
+	"poll update":              true,
+}
 
 func loadCachedMessages(jid string) []chatMessage {
 	data, err := os.ReadFile(messagesFilePath(jid))
@@ -468,9 +483,9 @@ func upsertMessage(messages map[string][]chatMessage, jid string, msg chatMessag
 // extractMessage pulls the text (or image) content out of a WhatsApp
 // message, unwrapping the ephemeral/view-once wrappers disappearing
 // messages arrive in, and returns the message's ContextInfo (see ci) when
-// the matched content type carries one. Anything else (video, documents,
-// stickers, polls, reactions, location, ...) the app doesn't render comes
-// back as msgType "unsupported" with a human-readable label in text (see
+// the matched content type carries one. Anything else (documents, location,
+// contacts, ...) the app doesn't render comes back as msgType "unsupported"
+// with a human-readable label in text (see
 // unsupportedMessageLabel) rather than being dropped — the app shows it as
 // "Unsupported message: <label>" so at least its arrival is visible, even
 // though its content isn't. A message carrying no populated content field
@@ -1964,7 +1979,7 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	// A poll vote arrives the same way — its own *events.Message with only
 	// Message.PollUpdateMessage set — see handlePollVote.
 	if evt.Message.GetPollUpdateMessage() != nil {
-		handlePollVote(ctx, client, evt, messages)
+		handlePollVote(ctx, client, logger, evt, messages)
 		return
 	}
 
@@ -2189,9 +2204,10 @@ func applyPollVote(votes []chatPollVote, sender, senderName string, fromMe bool,
 
 // matchPollVoteOptions maps a decrypted vote's selected SHA-256 hashes back
 // to indices into pollOptions, via whatsmeow.HashPollOptions (the same hash
-// whatsmeow's own BuildPollVote uses to encode a vote in the first place). A
-// hash with no match (stale option list, or a hash collision-proof
-// mismatch) is silently skipped rather than recorded as an invalid index.
+// whatsmeow's own BuildPollVote uses to encode a vote in the first place).
+// A hash with no match (e.g. a stale option list, or a hash that simply
+// doesn't correspond to any current option) is silently skipped rather
+// than recorded as an invalid index.
 func matchPollVoteOptions(pollOptions []string, selected [][]byte) []int {
 	hashes := whatsmeow.HashPollOptions(pollOptions)
 	indices := make([]int, 0, len(selected))
@@ -2210,11 +2226,12 @@ func matchPollVoteOptions(pollOptions []string, selected [][]byte) []int {
 // evt.Message.PollUpdateMessage.PollCreationMessageKey names, for a
 // *events.Message that carries a vote instead of ordinary content (see
 // handleMessage). A blank target ID, a chat this app ignores
-// (broadcast/junk), a target poll not currently cached (older than
-// maxMessagesPerChat, or in a chat never opened), or a vote that fails to
-// decrypt (e.g. this device never saw the poll's secret key) are all
-// silent no-ops — the same way an unmatched reaction is in handleReaction.
-func handlePollVote(ctx context.Context, client *whatsmeow.Client, evt *events.Message, messages map[string][]chatMessage) {
+// (broadcast/junk), or a target poll not currently cached (older than
+// maxMessagesPerChat, or in a chat never opened) are all silent no-ops —
+// the same way an unmatched reaction is in handleReaction. A vote that
+// fails to decrypt (e.g. this device never saw the poll's secret key) is
+// also a no-op but is logged at Debug level.
+func handlePollVote(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, evt *events.Message, messages map[string][]chatMessage) {
 	targetID := evt.Message.GetPollUpdateMessage().GetPollCreationMessageKey().GetID()
 	if targetID == "" {
 		return
@@ -2227,6 +2244,7 @@ func handlePollVote(ctx context.Context, client *whatsmeow.Client, evt *events.M
 
 	vote, err := client.DecryptPollVote(ctx, evt)
 	if err != nil {
+		logger.Debugf("failed to decrypt poll vote for %s: %v", targetID, err)
 		return
 	}
 
