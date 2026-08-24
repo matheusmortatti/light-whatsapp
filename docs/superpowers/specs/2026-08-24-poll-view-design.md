@@ -7,7 +7,10 @@ WhatsApp polls arrive over the wire as two message kinds: a
 each vote cast, a separate `PollUpdateMessage` referencing the creation
 message's key. Today `extractMessage` doesn't recognize either, so a
 poll falls into the `unsupported` default branch and shows as a fake
-message ("Unsupported message: poll creation v3") — see
+message ("Unsupported message: poll creation message v3" — the exact
+label `unsupportedMessageLabel`'s reflection walk produces, confirmed
+against `humanizeFieldName`'s trailing-"Message"-strip logic; a prior
+draft of this spec misquoted it as "poll creation v3") — see
 [[project_unsupported_message_bare_fallback_2026-08-07]]. `PollUpdateMessage`
 arrives as its own `*events.Message` the same way `ReactionMessage`
 does, so it's silently dropped by the same unsupported-branch path
@@ -62,8 +65,8 @@ from this app deferred as later, separately-scoped features.
   protobuf field several times — `PollCreationMessage`, `V2`, `V3`,
   `V5`, `V6` all carry the real `*PollCreationMessage` payload (`V4` is
   a `FutureProofMessage` placeholder, not real content, and is
-  skipped). The "poll creation v3" label already seen in the wild
-  (see Context) confirms `V3` is what's actually sent today, so the
+  skipped). The "poll creation message v3" label already seen in the
+  wild (see Context) confirms `V3` is what's actually sent today, so the
   branch must check all five real variants, not just the base field —
   a single case testing `m.GetPollCreationMessage() != nil ||
   m.GetPollCreationMessageV2() != nil || ... != nil` (or an equivalent
