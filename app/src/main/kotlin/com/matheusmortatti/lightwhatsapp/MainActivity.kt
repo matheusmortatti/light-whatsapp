@@ -838,6 +838,7 @@ private fun messagePreviewText(type: String, text: String): String = when (type)
     "video" -> text.ifBlank { "[Video]" }
     "gif" -> text.ifBlank { "[GIF]" }
     "audio" -> "[Voice message]"
+    "poll" -> "[Poll] $text"
     "unsupported" -> "[Unsupported message]"
     else -> text
 }
@@ -1094,6 +1095,17 @@ private fun MessageRow(
                 }
             }
 
+            "poll" -> {
+                MessageBodyText(text = message.text, align = bodyAlign)
+                MessageBodyText(
+                    text = formatPollOptions(message.pollOptions, message.pollVotes),
+                    lighten = true,
+                    align = bodyAlign,
+                )
+                val voterCount = message.pollVotes.size
+                ChatMetaText(text = if (voterCount == 1) "1 vote" else "$voterCount votes")
+            }
+
             "unsupported" -> MessageBodyText(
                 text = "[Unsupported message: ${message.text}]",
                 lighten = true,
@@ -1116,6 +1128,33 @@ private fun formatReactions(reactions: List<Reaction>): String =
     reactions.groupingBy { it.emoji }.eachCount().entries.joinToString(" ") { (emoji, count) ->
         if (count > 1) "$emoji×$count" else emoji
     }
+
+// Renders each poll option on its own line with a 5-segment bar scaled to
+// the highest-voted option, e.g.:
+//   ▸ Pepperoni  ■■■■□ 4
+//   ▸ Mushroom   □□□□□ 0
+// Counts come from flattening every voter's selectedOptions (a multi-select
+// poll lets one voter count toward several options at once) — who voted for
+// what isn't shown, matching the approved tally format (counts + bar, not
+// per-voter identity).
+private const val POLL_BAR_SEGMENTS = 5
+
+private fun formatPollOptions(options: List<String>, votes: List<PollVote>): String {
+    if (options.isEmpty()) return ""
+    val counts = IntArray(options.size)
+    for (vote in votes) {
+        for (index in vote.selectedOptions) {
+            if (index in counts.indices) counts[index]++
+        }
+    }
+    val maxCount = counts.max()
+    return options.indices.joinToString("\n") { i ->
+        val count = counts[i]
+        val filled = if (maxCount == 0) 0 else (count * POLL_BAR_SEGMENTS + maxCount - 1) / maxCount
+        val bar = "■".repeat(filled) + "□".repeat(POLL_BAR_SEGMENTS - filled)
+        "▸ ${options[i]}  $bar $count"
+    }
+}
 
 // Copy's own line-height (fontSize * 1.5, see LightTheme.kt) is tuned for
 // short standalone lines, not paragraphs — at that ratio, the gap between
