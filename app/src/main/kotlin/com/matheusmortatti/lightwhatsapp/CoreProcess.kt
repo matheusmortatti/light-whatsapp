@@ -20,9 +20,9 @@ data class Chat(
     val isGroup: Boolean,
 )
 
-// "text", "image", "audio", "video", "gif", and "sticker" show up here (see
-// core/main.go's extractMessage) — every other WhatsApp message type is
-// dropped before it reaches the app.
+// "text", "image", "audio", "video", "gif", "sticker", and "poll" show up
+// here (see core/main.go's extractMessage) — every other WhatsApp message
+// type is dropped before it reaches the app.
 data class Message(
     val id: String,
     val timestamp: Long,
@@ -53,6 +53,12 @@ data class Message(
     // never reach here — core/main.go treats them as unsupported.
     val stickerPath: String?,
     val stickerIsAnimated: Boolean,
+    // Poll question/options/selectable-count and current votes — see
+    // core/main.go's chatMessage.PollOptions/PollSelectableCount/PollVotes.
+    // The question itself is `text`, same as an image's caption.
+    val pollOptions: List<String>,
+    val pollSelectableCount: Int,
+    val pollVotes: List<PollVote>,
     // True once core has classified this media's download as permanently
     // failed (403/404/410 — see core/main.go's isPermanentDownloadFailure).
     // The corresponding *Path stays null forever in that case; no further
@@ -81,6 +87,16 @@ data class Reaction(
     val senderName: String?,
     val fromMe: Boolean,
     val emoji: String,
+)
+
+// One person's current vote on a poll message — see core/main.go's
+// chatPollVote. selectedOptions are indices into the poll message's
+// pollOptions.
+data class PollVote(
+    val sender: String,
+    val senderName: String?,
+    val fromMe: Boolean,
+    val selectedOptions: List<Int>,
 )
 
 sealed class CoreEvent {
@@ -286,6 +302,9 @@ class CoreProcess(private val context: Context) {
                 isGif = o.optBoolean("is_gif", false),
                 stickerPath = o.optString("sticker_path").ifBlank { null },
                 stickerIsAnimated = o.optBoolean("sticker_is_animated", false),
+                pollOptions = parsePollOptions(o.optJSONArray("poll_options")),
+                pollSelectableCount = o.optInt("poll_selectable_count", 0),
+                pollVotes = parsePollVotes(o.optJSONArray("poll_votes")),
                 imageFailed = o.optBoolean("image_failed", false),
                 audioFailed = o.optBoolean("audio_failed", false),
                 videoFailed = o.optBoolean("video_failed", false),
@@ -309,6 +328,25 @@ class CoreProcess(private val context: Context) {
                 senderName = o.optString("sender_name").ifBlank { null },
                 fromMe = o.optBoolean("from_me", false),
                 emoji = o.optString("emoji"),
+            )
+        }
+    }
+
+    private fun parsePollOptions(array: JSONArray?): List<String> {
+        if (array == null) return emptyList()
+        return (0 until array.length()).map { i -> array.getString(i) }
+    }
+
+    private fun parsePollVotes(array: JSONArray?): List<PollVote> {
+        if (array == null) return emptyList()
+        return (0 until array.length()).map { i ->
+            val o = array.getJSONObject(i)
+            val selected = o.optJSONArray("selected_options")
+            PollVote(
+                sender = o.getString("sender"),
+                senderName = o.optString("sender_name").ifBlank { null },
+                fromMe = o.optBoolean("from_me", false),
+                selectedOptions = if (selected == null) emptyList() else (0 until selected.length()).map { j -> selected.getInt(j) },
             )
         }
     }
