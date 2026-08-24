@@ -694,4 +694,39 @@ func TestSetQuotedFields(t *testing.T) {
 			t.Fatalf("got QuotedType=%q", cm.QuotedType)
 		}
 	})
+
+	t.Run("reply to a poll sets QuotedType=poll and the question as QuotedText", func(t *testing.T) {
+		cm := chatMessage{ID: "m1"}
+		ci := &waE2E.ContextInfo{
+			StanzaID:    proto.String("orig5"),
+			Participant: proto.String(ownJID.String()),
+			QuotedMessage: &waE2E.Message{PollCreationMessageV3: &waE2E.PollCreationMessage{
+				Name: proto.String("Best pizza topping?"),
+			}},
+		}
+		setQuotedFields(context.Background(), newClient(), &cm, ci)
+		if cm.QuotedType != "poll" || cm.QuotedText != "Best pizza topping?" {
+			t.Fatalf("got QuotedType=%q QuotedText=%q", cm.QuotedType, cm.QuotedText)
+		}
+	})
+}
+
+func TestSetPollFields(t *testing.T) {
+	cm := chatMessage{}
+	poll := &waE2E.PollCreationMessage{
+		Name: proto.String("Best pizza topping?"),
+		Options: []*waE2E.PollCreationMessage_Option{
+			{OptionName: proto.String("Pepperoni")},
+			{OptionName: proto.String("Mushroom")},
+			{OptionName: proto.String("Pineapple")},
+		},
+		SelectableOptionsCount: proto.Uint32(2),
+	}
+	setPollFields(&cm, poll)
+	if len(cm.PollOptions) != 3 || cm.PollOptions[0] != "Pepperoni" || cm.PollOptions[2] != "Pineapple" {
+		t.Fatalf("PollOptions = %+v", cm.PollOptions)
+	}
+	if cm.PollSelectableCount != 2 {
+		t.Fatalf("PollSelectableCount = %d, want 2", cm.PollSelectableCount)
+	}
 }

@@ -101,9 +101,11 @@ type command struct {
 }
 
 // chatMessage is one message within a chat, as sent to the app. Only text,
-// image, and audio messages are represented — everything else (documents,
-// polls, ...) is dropped during extraction, per the app's scope. Reactions
-// aren't their own chatMessage — see Reactions and handleReaction.
+// image, audio, video, gif, sticker, and poll messages are represented —
+// everything else (documents, ...) is dropped during extraction, per the
+// app's scope. Reactions aren't their own chatMessage — see Reactions and
+// handleReaction. Poll votes aren't their own chatMessage either — see
+// PollVotes and handlePollVote (added in a later task).
 type chatMessage struct {
 	ID        string `json:"id"`
 	Timestamp int64  `json:"timestamp"`
@@ -179,6 +181,13 @@ type chatMessage struct {
 	AudioFailed   bool `json:"audio_failed,omitempty"`
 	VideoFailed   bool `json:"video_failed,omitempty"`
 	StickerFailed bool `json:"sticker_failed,omitempty"`
+
+	// Question/options for a poll message — see setPollFields. Tallies
+	// aren't stored as a precomputed count; the app derives them
+	// client-side from PollVotes (added in a later task), the same way it
+	// already derives reaction counts from Reactions.
+	PollOptions         []string `json:"poll_options,omitempty"`
+	PollSelectableCount int      `json:"poll_selectable_count,omitempty"`
 
 	// Reactions on this message (see handleReaction and handleSendReaction),
 	// populated live whether the message is ours or someone else's.
@@ -746,6 +755,19 @@ func setStickerFields(cm *chatMessage, s *waE2E.StickerMessage) {
 	cm.StickerIsAnimated = s.GetIsAnimated()
 }
 
+// setPollFields is setImageFields' counterpart for polls — fills in cm's
+// options and selectable-option count from poll. The question itself is
+// already cm.Text (set by the caller from extractMessage's text return),
+// matching how an image's caption flows through the same text field rather
+// than a dedicated one.
+func setPollFields(cm *chatMessage, poll *waE2E.PollCreationMessage) {
+	cm.PollOptions = make([]string, len(poll.GetOptions()))
+	for i, opt := range poll.GetOptions() {
+		cm.PollOptions[i] = opt.GetOptionName()
+	}
+	cm.PollSelectableCount = int(poll.GetSelectableOptionsCount())
+}
+
 // setQuotedFields fills in cm's reply-preview fields from ci, the
 // ContextInfo of whichever content field extractMessage matched — a no-op
 // if ci is nil or carries no stanza ID (i.e. this message isn't a reply).
@@ -796,7 +818,7 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	if waMsg == nil || key.GetID() == "" {
 		return
 	}
-	text, msgType, img, audio, video, sticker, _, ci, ok := extractMessage(waMsg)
+	text, msgType, img, audio, video, sticker, poll, ci, ok := extractMessage(waMsg)
 	if !ok {
 		return
 	}
@@ -819,6 +841,9 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	}
 	if msgType == "sticker" && sticker != nil {
 		setStickerFields(&cm, sticker)
+	}
+	if msgType == "poll" && poll != nil {
+		setPollFields(&cm, poll)
 	}
 	setQuotedFields(ctx, client, &cm, ci)
 	// A message we sent from a different linked device (e.g. the phone)
@@ -1958,7 +1983,7 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 		emit(event{Type: "chats", Chats: list})
 	}
 
-	text, msgType, img, audio, video, sticker, _, ci, ok := extractMessage(evt.Message)
+	text, msgType, img, audio, video, sticker, poll, ci, ok := extractMessage(evt.Message)
 	if !ok {
 		return
 	}
@@ -1980,6 +2005,9 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 	}
 	if msgType == "sticker" && sticker != nil {
 		setStickerFields(&cm, sticker)
+	}
+	if msgType == "poll" && poll != nil {
+		setPollFields(&cm, poll)
 	}
 	setQuotedFields(ctx, client, &cm, ci)
 	// Same gap as extractHistoryMessage: a message sent from another linked
