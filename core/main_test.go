@@ -355,7 +355,7 @@ func TestCanonicalizeChatJIDBeforePairing(t *testing.T) {
 func TestExtractMessage(t *testing.T) {
 	t.Run("video message", func(t *testing.T) {
 		msg := &waE2E.Message{VideoMessage: &waE2E.VideoMessage{Caption: proto.String("look")}}
-		text, msgType, _, _, video, sticker, _, ok := extractMessage(msg)
+		text, msgType, _, _, video, sticker, _, _, ok := extractMessage(msg)
 		if !ok || msgType != "video" || text != "look" || video == nil || sticker != nil {
 			t.Fatalf("extractMessage() = text=%q type=%q video=%v sticker=%v ok=%v", text, msgType, video, sticker, ok)
 		}
@@ -363,7 +363,7 @@ func TestExtractMessage(t *testing.T) {
 
 	t.Run("gif is a video message with GifPlayback set", func(t *testing.T) {
 		msg := &waE2E.Message{VideoMessage: &waE2E.VideoMessage{GifPlayback: proto.Bool(true)}}
-		_, msgType, _, _, video, _, _, ok := extractMessage(msg)
+		_, msgType, _, _, video, _, _, _, ok := extractMessage(msg)
 		if !ok || msgType != "gif" || video == nil {
 			t.Fatalf("extractMessage() = type=%q video=%v ok=%v", msgType, video, ok)
 		}
@@ -371,7 +371,7 @@ func TestExtractMessage(t *testing.T) {
 
 	t.Run("sticker message", func(t *testing.T) {
 		msg := &waE2E.Message{StickerMessage: &waE2E.StickerMessage{IsAnimated: proto.Bool(true)}}
-		_, msgType, _, _, _, sticker, _, ok := extractMessage(msg)
+		_, msgType, _, _, _, sticker, _, _, ok := extractMessage(msg)
 		if !ok || msgType != "sticker" || sticker == nil {
 			t.Fatalf("extractMessage() = type=%q sticker=%v ok=%v", msgType, sticker, ok)
 		}
@@ -379,7 +379,7 @@ func TestExtractMessage(t *testing.T) {
 
 	t.Run("lottie sticker falls back to unsupported", func(t *testing.T) {
 		msg := &waE2E.Message{StickerMessage: &waE2E.StickerMessage{IsLottie: proto.Bool(true)}}
-		text, msgType, _, _, _, sticker, _, ok := extractMessage(msg)
+		text, msgType, _, _, _, sticker, _, _, ok := extractMessage(msg)
 		if !ok || msgType != "unsupported" || text != "lottie sticker" || sticker != nil {
 			t.Fatalf("extractMessage() = text=%q type=%q sticker=%v ok=%v", text, msgType, sticker, ok)
 		}
@@ -388,7 +388,7 @@ func TestExtractMessage(t *testing.T) {
 	t.Run("extended text message carries its ContextInfo", func(t *testing.T) {
 		ci := &waE2E.ContextInfo{StanzaID: proto.String("s1")}
 		msg := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String("hi"), ContextInfo: ci}}
-		text, msgType, _, _, _, _, gotCi, ok := extractMessage(msg)
+		text, msgType, _, _, _, _, _, gotCi, ok := extractMessage(msg)
 		if !ok || msgType != "text" || text != "hi" || gotCi.GetStanzaID() != "s1" {
 			t.Fatalf("extractMessage() = text=%q type=%q ci=%v ok=%v", text, msgType, gotCi, ok)
 		}
@@ -396,7 +396,7 @@ func TestExtractMessage(t *testing.T) {
 
 	t.Run("plain conversation text carries no ContextInfo", func(t *testing.T) {
 		msg := &waE2E.Message{Conversation: proto.String("hi")}
-		_, msgType, _, _, _, _, gotCi, ok := extractMessage(msg)
+		_, msgType, _, _, _, _, _, gotCi, ok := extractMessage(msg)
 		if !ok || msgType != "text" || gotCi != nil {
 			t.Fatalf("extractMessage() = type=%q ci=%v ok=%v", msgType, gotCi, ok)
 		}
@@ -404,7 +404,7 @@ func TestExtractMessage(t *testing.T) {
 
 	t.Run("a genuinely unrecognized content type is still shown as unsupported", func(t *testing.T) {
 		msg := &waE2E.Message{LocationMessage: &waE2E.LocationMessage{}}
-		text, msgType, _, _, _, _, _, ok := extractMessage(msg)
+		text, msgType, _, _, _, _, _, _, ok := extractMessage(msg)
 		if !ok || msgType != "unsupported" || text != "location" {
 			t.Fatalf("extractMessage() = text=%q type=%q ok=%v", text, msgType, ok)
 		}
@@ -412,7 +412,7 @@ func TestExtractMessage(t *testing.T) {
 
 	t.Run("a message with only a sender-key-distribution envelope is dropped, not shown as unsupported", func(t *testing.T) {
 		msg := &waE2E.Message{SenderKeyDistributionMessage: &waE2E.SenderKeyDistributionMessage{GroupID: proto.String("g1")}}
-		text, msgType, _, _, _, _, _, ok := extractMessage(msg)
+		text, msgType, _, _, _, _, _, _, ok := extractMessage(msg)
 		if ok || text != "" || msgType != "" {
 			t.Fatalf("extractMessage() = text=%q type=%q ok=%v, want dropped (ok=false)", text, msgType, ok)
 		}
@@ -420,7 +420,7 @@ func TestExtractMessage(t *testing.T) {
 
 	t.Run("a message with only MessageContextInfo is dropped, not shown as unsupported", func(t *testing.T) {
 		msg := &waE2E.Message{MessageContextInfo: &waE2E.MessageContextInfo{MessageSecret: []byte("s")}}
-		text, msgType, _, _, _, _, _, ok := extractMessage(msg)
+		text, msgType, _, _, _, _, _, _, ok := extractMessage(msg)
 		if ok || text != "" || msgType != "" {
 			t.Fatalf("extractMessage() = text=%q type=%q ok=%v, want dropped (ok=false)", text, msgType, ok)
 		}
@@ -428,9 +428,43 @@ func TestExtractMessage(t *testing.T) {
 
 	t.Run("a fully empty message is dropped, not shown as unsupported", func(t *testing.T) {
 		msg := &waE2E.Message{}
-		text, msgType, _, _, _, _, _, ok := extractMessage(msg)
+		text, msgType, _, _, _, _, _, _, ok := extractMessage(msg)
 		if ok || text != "" || msgType != "" {
 			t.Fatalf("extractMessage() = text=%q type=%q ok=%v, want dropped (ok=false)", text, msgType, ok)
+		}
+	})
+
+	t.Run("poll message", func(t *testing.T) {
+		msg := &waE2E.Message{PollCreationMessageV3: &waE2E.PollCreationMessage{
+			Name: proto.String("Best pizza topping?"),
+			Options: []*waE2E.PollCreationMessage_Option{
+				{OptionName: proto.String("Pepperoni")},
+				{OptionName: proto.String("Mushroom")},
+			},
+			SelectableOptionsCount: proto.Uint32(1),
+		}}
+		text, msgType, _, _, _, _, poll, _, ok := extractMessage(msg)
+		if !ok || msgType != "poll" || text != "Best pizza topping?" || poll == nil {
+			t.Fatalf("extractMessage() = text=%q type=%q poll=%v ok=%v", text, msgType, poll, ok)
+		}
+		if len(poll.GetOptions()) != 2 || poll.GetOptions()[0].GetOptionName() != "Pepperoni" {
+			t.Fatalf("poll options = %+v", poll.GetOptions())
+		}
+	})
+
+	t.Run("poll message checks every real protocol variant, not just the base field", func(t *testing.T) {
+		variants := []*waE2E.Message{
+			{PollCreationMessage: &waE2E.PollCreationMessage{Name: proto.String("q")}},
+			{PollCreationMessageV2: &waE2E.PollCreationMessage{Name: proto.String("q")}},
+			{PollCreationMessageV3: &waE2E.PollCreationMessage{Name: proto.String("q")}},
+			{PollCreationMessageV5: &waE2E.PollCreationMessage{Name: proto.String("q")}},
+			{PollCreationMessageV6: &waE2E.PollCreationMessage{Name: proto.String("q")}},
+		}
+		for i, msg := range variants {
+			_, msgType, _, _, _, _, poll, _, ok := extractMessage(msg)
+			if !ok || msgType != "poll" || poll == nil {
+				t.Fatalf("variant %d: extractMessage() = type=%q poll=%v ok=%v", i, msgType, poll, ok)
+			}
 		}
 	})
 }

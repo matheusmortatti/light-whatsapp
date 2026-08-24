@@ -448,30 +448,33 @@ func upsertMessage(messages map[string][]chatMessage, jid string, msg chatMessag
 // distribution or MessageContextInfo-only message) is dropped like
 // ProtocolMessage rather than shown as unsupported — see
 // unsupportedMessageLabel's hasContent.
-func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, audio *waE2E.AudioMessage, video *waE2E.VideoMessage, sticker *waE2E.StickerMessage, ci *waE2E.ContextInfo, ok bool) {
+func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMessage, audio *waE2E.AudioMessage, video *waE2E.VideoMessage, sticker *waE2E.StickerMessage, poll *waE2E.PollCreationMessage, ci *waE2E.ContextInfo, ok bool) {
 	for i := 0; i < 4 && m != nil; i++ {
+		if pm := pollMessageIn(m); pm != nil {
+			return pm.GetName(), "poll", nil, nil, nil, nil, pm, pm.GetContextInfo(), true
+		}
 		switch {
 		case m.GetConversation() != "":
-			return m.GetConversation(), "text", nil, nil, nil, nil, nil, true
+			return m.GetConversation(), "text", nil, nil, nil, nil, nil, nil, true
 		case m.GetExtendedTextMessage() != nil:
 			etm := m.GetExtendedTextMessage()
-			return etm.GetText(), "text", nil, nil, nil, nil, etm.GetContextInfo(), true
+			return etm.GetText(), "text", nil, nil, nil, nil, nil, etm.GetContextInfo(), true
 		case m.GetImageMessage() != nil:
 			im := m.GetImageMessage()
-			return im.GetCaption(), "image", im, nil, nil, nil, im.GetContextInfo(), true
+			return im.GetCaption(), "image", im, nil, nil, nil, nil, im.GetContextInfo(), true
 		case m.GetAudioMessage() != nil:
 			am := m.GetAudioMessage()
-			return "", "audio", nil, am, nil, nil, am.GetContextInfo(), true
+			return "", "audio", nil, am, nil, nil, nil, am.GetContextInfo(), true
 		case m.GetVideoMessage() != nil:
 			vm := m.GetVideoMessage()
 			vType := "video"
 			if vm.GetGifPlayback() {
 				vType = "gif"
 			}
-			return vm.GetCaption(), vType, nil, nil, vm, nil, vm.GetContextInfo(), true
+			return vm.GetCaption(), vType, nil, nil, vm, nil, nil, vm.GetContextInfo(), true
 		case m.GetStickerMessage() != nil && !m.GetStickerMessage().GetIsLottie():
 			sm := m.GetStickerMessage()
-			return "", "sticker", nil, nil, nil, sm, sm.GetContextInfo(), true
+			return "", "sticker", nil, nil, nil, sm, nil, sm.GetContextInfo(), true
 		case m.GetEphemeralMessage() != nil:
 			m = m.GetEphemeralMessage().GetMessage()
 		case m.GetViewOnceMessage() != nil:
@@ -482,7 +485,7 @@ func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMes
 			// Internal plumbing (history-sync notifications, app-state key
 			// distribution, ephemeral-setting changes, revokes, ...), never
 			// user-authored content. Drop instead of showing as unsupported.
-			return "", "", nil, nil, nil, nil, nil, false
+			return "", "", nil, nil, nil, nil, nil, nil, false
 		default:
 			label, hasContent := unsupportedMessageLabel(m)
 			if !hasContent {
@@ -490,12 +493,36 @@ func extractMessage(m *waE2E.Message) (text, msgType string, img *waE2E.ImageMes
 				// envelope (a standalone key-distribution message, or one
 				// carrying only MessageContextInfo metadata). Same as
 				// ProtocolMessage: drop instead of showing as unsupported.
-				return "", "", nil, nil, nil, nil, nil, false
+				return "", "", nil, nil, nil, nil, nil, nil, false
 			}
-			return label, "unsupported", nil, nil, nil, nil, nil, true
+			return label, "unsupported", nil, nil, nil, nil, nil, nil, true
 		}
 	}
-	return "", "", nil, nil, nil, nil, nil, false
+	return "", "", nil, nil, nil, nil, nil, nil, false
+}
+
+// pollMessageIn returns whichever real poll-creation payload m carries, or
+// nil. WhatsApp has revised the poll protobuf field several times —
+// PollCreationMessage/V2/V3/V5/V6 all carry the same *PollCreationMessage
+// shape; V3 is what's actually sent as of this writing (confirmed by the
+// "poll creation v3" label previously surfaced via unsupportedMessageLabel's
+// reflection fallback, before this function existed). V4 is deliberately
+// excluded — it's a FutureProofMessage placeholder, not real poll content.
+func pollMessageIn(m *waE2E.Message) *waE2E.PollCreationMessage {
+	switch {
+	case m.GetPollCreationMessage() != nil:
+		return m.GetPollCreationMessage()
+	case m.GetPollCreationMessageV2() != nil:
+		return m.GetPollCreationMessageV2()
+	case m.GetPollCreationMessageV3() != nil:
+		return m.GetPollCreationMessageV3()
+	case m.GetPollCreationMessageV5() != nil:
+		return m.GetPollCreationMessageV5()
+	case m.GetPollCreationMessageV6() != nil:
+		return m.GetPollCreationMessageV6()
+	default:
+		return nil
+	}
 }
 
 // unsupportedMessageLabel names whichever content field is populated on m,
@@ -733,7 +760,7 @@ func setQuotedFields(ctx context.Context, client *whatsmeow.Client, cm *chatMess
 	}
 	cm.QuotedID = ci.GetStanzaID()
 
-	qText, qType, _, _, _, _, _, ok := extractMessage(ci.GetQuotedMessage())
+	qText, qType, _, _, _, _, _, _, ok := extractMessage(ci.GetQuotedMessage())
 	if ok {
 		cm.QuotedType = qType
 		cm.QuotedText = qText
@@ -769,7 +796,7 @@ func extractHistoryMessage(ctx context.Context, client *whatsmeow.Client, jid ty
 	if waMsg == nil || key.GetID() == "" {
 		return
 	}
-	text, msgType, img, audio, video, sticker, ci, ok := extractMessage(waMsg)
+	text, msgType, img, audio, video, sticker, _, ci, ok := extractMessage(waMsg)
 	if !ok {
 		return
 	}
@@ -1931,7 +1958,7 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 		emit(event{Type: "chats", Chats: list})
 	}
 
-	text, msgType, img, audio, video, sticker, ci, ok := extractMessage(evt.Message)
+	text, msgType, img, audio, video, sticker, _, ci, ok := extractMessage(evt.Message)
 	if !ok {
 		return
 	}
