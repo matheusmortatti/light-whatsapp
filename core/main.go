@@ -15,6 +15,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -189,6 +190,12 @@ type chatMessage struct {
 	PollOptions         []string `json:"poll_options,omitempty"`
 	PollSelectableCount int      `json:"poll_selectable_count,omitempty"`
 
+	// Votes on this poll message — see handlePollVote. Populated live
+	// whether the poll is ours or someone else's. Tallies are derived
+	// client-side (app-side), the same way reaction counts are derived
+	// from Reactions rather than precomputed here.
+	PollVotes []chatPollVote `json:"poll_votes,omitempty"`
+
 	// Reactions on this message (see handleReaction and handleSendReaction),
 	// populated live whether the message is ours or someone else's.
 	Reactions []chatReaction `json:"reactions,omitempty"`
@@ -214,6 +221,20 @@ type chatReaction struct {
 	SenderName string `json:"sender_name,omitempty"` // best-effort display name, group chats only
 	FromMe     bool   `json:"from_me,omitempty"`
 	Emoji      string `json:"emoji"`
+}
+
+// chatPollVote is one person's current vote on a poll message, keyed by
+// Sender so a later vote from the same person replaces their earlier one
+// (WhatsApp re-votes fully replace, not add to, the previous selection) —
+// same upsert-by-sender shape as chatReaction, with Emoji swapped for
+// option indices. An empty SelectedOptions is WhatsApp's retract-vote
+// signal and removes the sender's entry entirely, mirroring how
+// applyReaction treats a blank emoji.
+type chatPollVote struct {
+	Sender          string `json:"sender"`
+	SenderName      string `json:"sender_name,omitempty"` // group chats only
+	FromMe          bool   `json:"from_me,omitempty"`
+	SelectedOptions []int  `json:"selected_options"` // indices into the poll message's PollOptions
 }
 
 // chatSummary is one entry of a "chats" event: a single conversation as
@@ -1940,6 +1961,12 @@ func handleMessage(ctx context.Context, client *whatsmeow.Client, logger waLog.L
 		handleReaction(ctx, client, evt, messages)
 		return
 	}
+	// A poll vote arrives the same way — its own *events.Message with only
+	// Message.PollUpdateMessage set — see handlePollVote.
+	if evt.Message.GetPollUpdateMessage() != nil {
+		handlePollVote(ctx, client, evt, messages)
+		return
+	}
 
 	jid := evt.Info.Chat
 	if jid.Server == types.BroadcastServer || isJunkChatJID(jid) {
@@ -2129,6 +2156,111 @@ func applyReaction(reactions []chatReaction, sender, senderName string, fromMe b
 	}
 	reactions[idx] = entry
 	return reactions
+}
+
+// applyPollVote upserts sender's vote into votes: an empty selectedOptions
+// (see chatPollVote's doc comment) removes sender's existing entry if any,
+// otherwise sender's entry is added or fully replaced with selectedOptions.
+// Always returns a clone with its own backing array — votes is never
+// mutated in place — for the same concurrent-read reason applyReaction
+// documents.
+func applyPollVote(votes []chatPollVote, sender, senderName string, fromMe bool, selectedOptions []int) []chatPollVote {
+	votes = slices.Clone(votes)
+	idx := -1
+	for i, v := range votes {
+		if v.Sender == sender {
+			idx = i
+			break
+		}
+	}
+	if len(selectedOptions) == 0 {
+		if idx == -1 {
+			return votes
+		}
+		return append(votes[:idx], votes[idx+1:]...)
+	}
+	entry := chatPollVote{Sender: sender, SenderName: senderName, FromMe: fromMe, SelectedOptions: selectedOptions}
+	if idx == -1 {
+		return append(votes, entry)
+	}
+	votes[idx] = entry
+	return votes
+}
+
+// matchPollVoteOptions maps a decrypted vote's selected SHA-256 hashes back
+// to indices into pollOptions, via whatsmeow.HashPollOptions (the same hash
+// whatsmeow's own BuildPollVote uses to encode a vote in the first place). A
+// hash with no match (stale option list, or a hash collision-proof
+// mismatch) is silently skipped rather than recorded as an invalid index.
+func matchPollVoteOptions(pollOptions []string, selected [][]byte) []int {
+	hashes := whatsmeow.HashPollOptions(pollOptions)
+	indices := make([]int, 0, len(selected))
+	for _, sel := range selected {
+		for i, h := range hashes {
+			if bytes.Equal(h, sel) {
+				indices = append(indices, i)
+				break
+			}
+		}
+	}
+	return indices
+}
+
+// handlePollVote updates the PollVotes of whichever cached poll message
+// evt.Message.PollUpdateMessage.PollCreationMessageKey names, for a
+// *events.Message that carries a vote instead of ordinary content (see
+// handleMessage). A blank target ID, a chat this app ignores
+// (broadcast/junk), a target poll not currently cached (older than
+// maxMessagesPerChat, or in a chat never opened), or a vote that fails to
+// decrypt (e.g. this device never saw the poll's secret key) are all
+// silent no-ops — the same way an unmatched reaction is in handleReaction.
+func handlePollVote(ctx context.Context, client *whatsmeow.Client, evt *events.Message, messages map[string][]chatMessage) {
+	targetID := evt.Message.GetPollUpdateMessage().GetPollCreationMessageKey().GetID()
+	if targetID == "" {
+		return
+	}
+	jid := canonicalizeChatJID(ctx, client, evt.Info.Chat)
+	if jid.Server == types.BroadcastServer || isJunkChatJID(jid) {
+		return
+	}
+	jidStr := jid.String()
+
+	vote, err := client.DecryptPollVote(ctx, evt)
+	if err != nil {
+		return
+	}
+
+	senderName := ""
+	if evt.Info.IsGroup && !evt.Info.IsFromMe {
+		senderName = evt.Info.PushName
+	}
+	senderKey := canonicalizeChatJID(ctx, client, evt.Info.Sender).ToNonAD().String()
+
+	messagesMu.Lock()
+	list, ok := messages[jidStr]
+	var updated chatMessage
+	found := false
+	if ok {
+		for i, cur := range list {
+			if cur.ID == targetID {
+				selected := matchPollVoteOptions(cur.PollOptions, vote.GetSelectedOptions())
+				cur.PollVotes = applyPollVote(cur.PollVotes, senderKey, senderName, evt.Info.IsFromMe, selected)
+				list[i] = cur
+				updated = cur
+				found = true
+				break
+			}
+		}
+		if found {
+			messages[jidStr] = list
+			saveMessages(jidStr, list)
+		}
+	}
+	messagesMu.Unlock()
+
+	if found {
+		emit(event{Type: "message_update", JID: jidStr, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
+	}
 }
 
 // contactName looks up the best display name whatsmeow's contact store has

@@ -271,6 +271,83 @@ func TestApplyReaction(t *testing.T) {
 	})
 }
 
+func TestApplyPollVote(t *testing.T) {
+	t.Run("adds a new vote", func(t *testing.T) {
+		got := applyPollVote(nil, "a@s.whatsapp.net", "", false, []int{0})
+		if len(got) != 1 || got[0].Sender != "a@s.whatsapp.net" || len(got[0].SelectedOptions) != 1 || got[0].SelectedOptions[0] != 0 {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("same sender voting again replaces their selection, doesn't add a second entry", func(t *testing.T) {
+		votes := []chatPollVote{{Sender: "a@s.whatsapp.net", SelectedOptions: []int{0}}}
+		got := applyPollVote(votes, "a@s.whatsapp.net", "", false, []int{1, 2})
+		if len(got) != 1 || len(got[0].SelectedOptions) != 2 || got[0].SelectedOptions[0] != 1 {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("empty selection removes the sender's existing vote (retract)", func(t *testing.T) {
+		votes := []chatPollVote{
+			{Sender: "a@s.whatsapp.net", SelectedOptions: []int{0}},
+			{Sender: "b@s.whatsapp.net", SelectedOptions: []int{1}},
+		}
+		got := applyPollVote(votes, "a@s.whatsapp.net", "", false, nil)
+		if len(got) != 1 || got[0].Sender != "b@s.whatsapp.net" {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("empty selection for a sender with no existing vote is a no-op", func(t *testing.T) {
+		votes := []chatPollVote{{Sender: "a@s.whatsapp.net", SelectedOptions: []int{0}}}
+		got := applyPollVote(votes, "b@s.whatsapp.net", "", false, nil)
+		if len(got) != 1 || got[0].Sender != "a@s.whatsapp.net" {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("multiple senders can each have their own vote", func(t *testing.T) {
+		votes := applyPollVote(nil, "a@s.whatsapp.net", "", false, []int{0})
+		votes = applyPollVote(votes, "b@s.whatsapp.net", "Bee", false, []int{1})
+		if len(votes) != 2 {
+			t.Fatalf("got %+v", votes)
+		}
+	})
+}
+
+func TestMatchPollVoteOptions(t *testing.T) {
+	options := []string{"Pepperoni", "Mushroom", "Pineapple"}
+	hashes := whatsmeow.HashPollOptions(options)
+
+	t.Run("matches a single selected hash to its option index", func(t *testing.T) {
+		got := matchPollVoteOptions(options, [][]byte{hashes[1]})
+		if len(got) != 1 || got[0] != 1 {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("matches multiple selected hashes in order", func(t *testing.T) {
+		got := matchPollVoteOptions(options, [][]byte{hashes[2], hashes[0]})
+		if len(got) != 2 || got[0] != 2 || got[1] != 0 {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("an unmatched hash is skipped, not appended as -1 or similar", func(t *testing.T) {
+		got := matchPollVoteOptions(options, [][]byte{[]byte("not a real hash")})
+		if len(got) != 0 {
+			t.Fatalf("got %+v, want empty", got)
+		}
+	})
+
+	t.Run("no selected hashes returns an empty (not nil-vs-empty-sensitive) slice", func(t *testing.T) {
+		got := matchPollVoteOptions(options, nil)
+		if len(got) != 0 {
+			t.Fatalf("got %+v, want empty", got)
+		}
+	})
+}
+
 func TestReactionSenderJID(t *testing.T) {
 	t.Run("our own message resolves to EmptyJID", func(t *testing.T) {
 		chat := types.NewJID("111", types.DefaultUserServer)
