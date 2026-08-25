@@ -92,13 +92,14 @@ type event struct {
 // "send_reaction" to react to an existing message (MessageID) with Emoji
 // ("" removes a previously-sent reaction).
 type command struct {
-	Type       string `json:"type"`
-	JID        string `json:"jid,omitempty"`
-	Text       string `json:"text,omitempty"`
-	AudioPath  string `json:"audio_path,omitempty"`
-	DurationMs int64  `json:"duration_ms,omitempty"`
-	MessageID  string `json:"message_id,omitempty"`
-	Emoji      string `json:"emoji,omitempty"`
+	Type            string `json:"type"`
+	JID             string `json:"jid,omitempty"`
+	Text            string `json:"text,omitempty"`
+	AudioPath       string `json:"audio_path,omitempty"`
+	DurationMs      int64  `json:"duration_ms,omitempty"`
+	MessageID       string `json:"message_id,omitempty"`
+	Emoji           string `json:"emoji,omitempty"`
+	SelectedOptions []int  `json:"selected_options,omitempty"`
 }
 
 // chatMessage is one message within a chat, as sent to the app. Only text,
@@ -1713,6 +1714,98 @@ func handleSendReaction(ctx context.Context, client *whatsmeow.Client, logger wa
 	}
 }
 
+// handleSendPollVote sends selectedOptions (indices into the cached poll's
+// PollOptions) as jidStr's vote on the poll message messageID, then folds
+// it into the local cache the same way handleSendReaction does for a
+// reaction, since WhatsApp doesn't echo our own outgoing vote back as an
+// event either. An empty selectedOptions retracts any existing vote (see
+// applyPollVote/chatPollVote's doc comments) — WhatsApp represents "no
+// selection" the same way whether it's an initial empty vote or a retract.
+func handleSendPollVote(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger, jidStr, messageID string, selectedOptions []int, messages map[string][]chatMessage) {
+	jid, err := types.ParseJID(jidStr)
+	if err != nil {
+		logger.Warnf("send_poll_vote: bad jid %q: %v", jidStr, err)
+		return
+	}
+
+	messagesMu.Lock()
+	list := messages[jidStr]
+	idx := -1
+	for i, m := range list {
+		if m.ID == messageID {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		messagesMu.Unlock()
+		logger.Warnf("send_poll_vote: message %s not found in %s", messageID, jidStr)
+		return
+	}
+	target := list[idx]
+	messagesMu.Unlock()
+
+	if target.Type != "poll" {
+		logger.Warnf("send_poll_vote: message %s in %s is not a poll", messageID, jidStr)
+		return
+	}
+
+	sender, err := reactionSenderJID(jid, target)
+	if err != nil {
+		logger.Warnf("send_poll_vote: %v", err)
+		return
+	}
+
+	pollInfo := &types.MessageInfo{
+		MessageSource: types.MessageSource{
+			Chat:     jid,
+			Sender:   sender,
+			IsFromMe: target.FromMe,
+			IsGroup:  jid.Server == types.GroupServer,
+		},
+		ID: messageID,
+	}
+
+	optionNames := pollVoteOptionNames(target.PollOptions, selectedOptions)
+	voteMsg, err := client.BuildPollVote(ctx, pollInfo, optionNames)
+	if err != nil {
+		logger.Warnf("send_poll_vote: failed to build vote for %s: %v", messageID, err)
+		emit(event{Type: "error", Message: fmt.Sprintf("failed to build poll vote: %v", err)})
+		return
+	}
+
+	_, err = client.SendMessage(ctx, jid, voteMsg)
+	if err != nil {
+		logger.Warnf("send_poll_vote in %s failed: %v", jidStr, err)
+		emit(event{Type: "error", Message: fmt.Sprintf("failed to send poll vote: %v", err)})
+		return
+	}
+
+	messagesMu.Lock()
+	list = messages[jidStr]
+	var updated chatMessage
+	found := false
+	for i, cur := range list {
+		if cur.ID == messageID {
+			ownKey := canonicalizeChatJID(ctx, client, client.Store.GetJID()).ToNonAD().String()
+			cur.PollVotes = applyPollVote(cur.PollVotes, ownKey, "", true, selectedOptions)
+			list[i] = cur
+			updated = cur
+			found = true
+			break
+		}
+	}
+	if found {
+		messages[jidStr] = list
+		saveMessages(jidStr, list)
+	}
+	messagesMu.Unlock()
+
+	if found {
+		emit(event{Type: "message_update", JID: jidStr, Messages: resolveMentionsInList(ctx, client, []chatMessage{updated})})
+	}
+}
+
 // readCommands is the stdin half of the protocol: one JSON command per
 // line from the app. Runs for the life of the process; a closed stdin
 // (app process torn down) just ends the loop.
@@ -1744,6 +1837,10 @@ func readCommands(ctx context.Context, client *whatsmeow.Client, logger waLog.Lo
 		case "send_reaction":
 			if cmd.JID != "" && cmd.MessageID != "" {
 				go handleSendReaction(ctx, client, logger, cmd.JID, cmd.MessageID, cmd.Emoji, messages)
+			}
+		case "send_poll_vote":
+			if cmd.JID != "" && cmd.MessageID != "" {
+				go handleSendPollVote(ctx, client, logger, cmd.JID, cmd.MessageID, cmd.SelectedOptions, messages)
 			}
 		default:
 			logger.Warnf("unknown command from app: %s", cmd.Type)
