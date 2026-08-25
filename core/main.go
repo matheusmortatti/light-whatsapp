@@ -88,9 +88,12 @@ type event struct {
 // one conversation's messages and mark it read, "close_chat" to tell core
 // the app navigated away (see openChatJID), "send_message" to send a text
 // message to a jid, "send_audio" to upload and send a recorded voice
-// message (AudioPath, relative to the working dir, plus its DurationMs), or
+// message (AudioPath, relative to the working dir, plus its DurationMs),
 // "send_reaction" to react to an existing message (MessageID) with Emoji
-// ("" removes a previously-sent reaction).
+// ("" removes a previously-sent reaction), or "send_poll_vote" to cast (or
+// retract) a vote on an existing poll message (MessageID) via
+// SelectedOptions (indices into the poll's options; an empty
+// SelectedOptions retracts any previously-sent vote).
 type command struct {
 	Type            string `json:"type"`
 	JID             string `json:"jid,omitempty"`
@@ -1755,6 +1758,16 @@ func handleSendPollVote(ctx context.Context, client *whatsmeow.Client, logger wa
 		logger.Warnf("send_poll_vote: %v", err)
 		return
 	}
+	// BuildPollVote's pollInfo.Sender must be a real JID identifying the
+	// poll's original sender — unlike BuildMessageKey (what
+	// reactionSenderJID was designed for), it never treats EmptyJID as a
+	// "this is our own message" sentinel: it's used directly as a lookup
+	// key into the poll's stored secret, and whatsmeow stores a fromMe
+	// poll's secret under our own non-AD JID. Override
+	// reactionSenderJID's EmptyJID answer with that JID here.
+	if target.FromMe {
+		sender = client.Store.GetJID().ToNonAD()
+	}
 
 	pollInfo := &types.MessageInfo{
 		MessageSource: types.MessageSource{
@@ -1770,7 +1783,6 @@ func handleSendPollVote(ctx context.Context, client *whatsmeow.Client, logger wa
 	voteMsg, err := client.BuildPollVote(ctx, pollInfo, optionNames)
 	if err != nil {
 		logger.Warnf("send_poll_vote: failed to build vote for %s: %v", messageID, err)
-		emit(event{Type: "error", Message: fmt.Sprintf("failed to build poll vote: %v", err)})
 		return
 	}
 

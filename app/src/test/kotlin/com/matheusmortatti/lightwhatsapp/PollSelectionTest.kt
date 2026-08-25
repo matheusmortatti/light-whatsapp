@@ -34,4 +34,9 @@ class PollSelectionTest {
     fun `multi-select poll allows adding up to the cap`() {
         assertEquals(listOf(0, 1, 2), nextPollSelection(current = listOf(0, 1), tapped = 2, cap = 3))
     }
+
+    @Test
+    fun `cap of zero means nothing is selectable`() {
+        assertEquals(emptyList(), nextPollSelection(current = emptyList(), tapped = 0, cap = 0))
+    }
 }

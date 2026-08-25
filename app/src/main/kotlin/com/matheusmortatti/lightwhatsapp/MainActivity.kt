@@ -587,7 +587,8 @@ private fun ChatDetailScreen(
                             onReact = { reactingTo = it },
                             onTogglePollOption = { message, index ->
                                 val current = message.pollVotes.firstOrNull { it.fromMe }?.selectedOptions ?: emptyList()
-                                val next = nextPollSelection(current, index, message.pollSelectableCount)
+                                val cap = message.pollSelectableCount.takeIf { it > 0 } ?: message.pollOptions.size
+                                val next = nextPollSelection(current, index, cap)
                                 if (next != current) onSendPollVote(message.id, next)
                             },
                             modifier = Modifier.padding(
