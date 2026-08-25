@@ -348,6 +348,38 @@ func TestMatchPollVoteOptions(t *testing.T) {
 	})
 }
 
+func TestPollVoteOptionNames(t *testing.T) {
+	options := []string{"Pepperoni", "Mushroom", "Pineapple"}
+
+	t.Run("maps a single index to its option name", func(t *testing.T) {
+		got := pollVoteOptionNames(options, []int{1})
+		if len(got) != 1 || got[0] != "Mushroom" {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("maps multiple indices in order", func(t *testing.T) {
+		got := pollVoteOptionNames(options, []int{2, 0})
+		if len(got) != 2 || got[0] != "Pineapple" || got[1] != "Pepperoni" {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("an out-of-range index is skipped, not appended as empty string", func(t *testing.T) {
+		got := pollVoteOptionNames(options, []int{5, -1, 1})
+		if len(got) != 1 || got[0] != "Mushroom" {
+			t.Fatalf("got %+v, want just Mushroom", got)
+		}
+	})
+
+	t.Run("no selected indices returns an empty (not nil-vs-empty-sensitive) slice", func(t *testing.T) {
+		got := pollVoteOptionNames(options, nil)
+		if len(got) != 0 {
+			t.Fatalf("got %+v, want empty", got)
+		}
+	})
+}
+
 func TestReactionSenderJID(t *testing.T) {
 	t.Run("our own message resolves to EmptyJID", func(t *testing.T) {
 		chat := types.NewJID("111", types.DefaultUserServer)

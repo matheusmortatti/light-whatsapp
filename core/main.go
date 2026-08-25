@@ -2202,6 +2202,26 @@ func applyPollVote(votes []chatPollVote, sender, senderName string, fromMe bool,
 	return votes
 }
 
+// pollVoteOptionNames maps selectedIndices (indices into pollOptions,
+// e.g. from a "send_poll_vote" command) to their option-name strings, the
+// input shape whatsmeow.BuildPollVote/HashPollOptions actually needs — the
+// same hash is computed both here (indirectly, via BuildPollVote) and by
+// matchPollVoteOptions when decoding an incoming vote, so encoding by name
+// rather than index is what keeps the two sides consistent. An
+// out-of-range index (the client-side toggle logic shouldn't send one, but
+// core doesn't trust it) is silently skipped rather than panicking or
+// appending a bogus empty-string option name.
+func pollVoteOptionNames(pollOptions []string, selectedIndices []int) []string {
+	names := make([]string, 0, len(selectedIndices))
+	for _, idx := range selectedIndices {
+		if idx < 0 || idx >= len(pollOptions) {
+			continue
+		}
+		names = append(names, pollOptions[idx])
+	}
+	return names
+}
+
 // matchPollVoteOptions maps a decrypted vote's selected SHA-256 hashes back
 // to indices into pollOptions, via whatsmeow.HashPollOptions (the same hash
 // whatsmeow's own BuildPollVote uses to encode a vote in the first place).
