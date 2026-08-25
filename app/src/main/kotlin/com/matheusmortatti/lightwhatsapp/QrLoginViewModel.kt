@@ -134,6 +134,11 @@ class QrLoginViewModel(application: Application) : AndroidViewModel(application)
         coreProcess.sendReaction(jid, messageId, emoji)
     }
 
+    fun sendPollVote(messageId: String, selectedOptions: List<Int>) {
+        val jid = _selectedChat.value?.jid ?: return
+        coreProcess.sendPollVote(jid, messageId, selectedOptions)
+    }
+
     private fun encodeQr(text: String, size: Int = 512): ImageBitmap {
         val matrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)

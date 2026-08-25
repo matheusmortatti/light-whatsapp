@@ -237,6 +237,24 @@ class CoreProcess(private val context: Context) {
         )
     }
 
+    /**
+     * Sends a "send_poll_vote" command to core's stdin, asking it to cast
+     * (or change) this device's vote on a poll message — see
+     * core/main.go's readCommands/handleSendPollVote. [selectedOptions] is
+     * the complete replacement selection (indices into the poll's
+     * options), not a delta — an empty list retracts the vote. A no-op if
+     * the subprocess isn't running.
+     */
+    fun sendPollVote(jid: String, messageId: String, selectedOptions: List<Int>) {
+        writeCommand(
+            JSONObject()
+                .put("type", "send_poll_vote")
+                .put("jid", jid)
+                .put("message_id", messageId)
+                .put("selected_options", JSONArray(selectedOptions)),
+        )
+    }
+
     private fun writeCommand(command: JSONObject) {
         val out = process?.outputStream ?: return
         val line = command.toString() + "\n"
