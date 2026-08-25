@@ -1127,6 +1127,19 @@ private fun formatReactions(reactions: List<Reaction>): String =
         if (count > 1) "$emoji×$count" else emoji
     }
 
+// Computes the complete new selection after tapping option tapped on a
+// poll whose selectable-option count is cap: deselects if already
+// selected, otherwise adds it unless the selection is already at cap (the
+// user must deselect one first — this also naturally covers single-select,
+// cap == 1: tapping a different option while one is already selected is a
+// no-op). A poll vote is always sent as this complete replacement set, not
+// a delta, so this returns the full next selection, not just tapped.
+internal fun nextPollSelection(current: List<Int>, tapped: Int, cap: Int): List<Int> {
+    if (tapped in current) return current - tapped
+    if (current.size >= cap) return current
+    return current + tapped
+}
+
 private const val POLL_BAR_SEGMENTS = 5
 
 // Width of the "bar count" column in PollTallyRows, e.g. "■■■■■ 12" at
