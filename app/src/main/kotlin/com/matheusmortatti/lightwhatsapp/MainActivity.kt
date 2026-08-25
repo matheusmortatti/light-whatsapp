@@ -1098,11 +1098,7 @@ private fun MessageRow(
             "poll" -> {
                 MessageBodyText(text = message.text, align = bodyAlign)
                 if (message.pollOptions.isNotEmpty()) {
-                    MessageBodyText(
-                        text = formatPollOptions(message.pollOptions, message.pollVotes),
-                        lighten = true,
-                        align = bodyAlign,
-                    )
+                    PollTallyRows(options = message.pollOptions, votes = message.pollVotes, bodyAlign = bodyAlign)
                     val voterCount = message.pollVotes.size
                     ChatMetaText(text = if (voterCount == 1) "1 vote" else "$voterCount votes")
                 }
@@ -1133,16 +1129,35 @@ private fun formatReactions(reactions: List<Reaction>): String =
 
 private const val POLL_BAR_SEGMENTS = 5
 
-// Renders each poll option on its own line with a 5-segment bar scaled to
-// the highest-voted option, e.g.:
-//   ▸ Pepperoni  ■■■■□ 4
-//   ▸ Mushroom   □□□□□ 0
+// Width of the "bar count" column in PollTallyRows, e.g. "■■■■■ 12" at
+// POLL_BAR_SEGMENTS=5 plus up to 2 digits of headroom. Fixed (not
+// content-sized) so the column's left edge lands at the same x on every
+// row regardless of that row's own option-label length — see
+// PollTallyRows' comment for why a per-row intrinsic width doesn't achieve
+// this even with a monospace font.
+private val POLL_TALLY_COLUMN_WIDTH = 110.dp
+
+// Renders each poll option as its own row: a label on the left (natural
+// width, wraps like any other message text) and a fixed-width "bar count"
+// column on the right, e.g.:
+//   ▸ Pepperoni        ■■■■□ 4
+//   ▸ Mushroom         □□□□□ 0
+// Two Text elements per row (not one joined multi-line string) because a
+// single string can't align a column across rows in a proportional font —
+// per-glyph widths (e.g. "1" vs "0", or a bar's filled "■" vs empty "□")
+// aren't guaranteed equal, so padding with spaces drifts. Monospace alone
+// isn't enough either: an unweighted, unfixed-width Text still measures
+// narrower for a 1-digit count than a 2-digit one, shifting where the bar
+// starts. Giving the label column weight(1f) and the tally column a fixed
+// width removes both sources of drift — the tally column's left edge is a
+// constant (row width − POLL_TALLY_COLUMN_WIDTH) on every row.
+//
 // Counts come from flattening every voter's selectedOptions (a multi-select
 // poll lets one voter count toward several options at once) — who voted for
 // what isn't shown, matching the approved tally format (counts + bar, not
 // per-voter identity).
-private fun formatPollOptions(options: List<String>, votes: List<PollVote>): String {
-    if (options.isEmpty()) return ""
+@Composable
+private fun PollTallyRows(options: List<String>, votes: List<PollVote>, bodyAlign: TextAlign) {
     val counts = IntArray(options.size)
     for (vote in votes) {
         for (index in vote.selectedOptions) {
@@ -1150,11 +1165,28 @@ private fun formatPollOptions(options: List<String>, votes: List<PollVote>): Str
         }
     }
     val maxCount = counts.max()
-    return options.indices.joinToString("\n") { i ->
-        val count = counts[i]
-        val filled = if (maxCount == 0) 0 else (count * POLL_BAR_SEGMENTS + maxCount - 1) / maxCount
-        val bar = "■".repeat(filled) + "□".repeat(POLL_BAR_SEGMENTS - filled)
-        "▸ ${options[i]}  $bar $count"
+    Column(modifier = Modifier.fillMaxWidth()) {
+        options.forEachIndexed { i, option ->
+            val count = counts[i]
+            val filled = if (maxCount == 0) 0 else (count * POLL_BAR_SEGMENTS + maxCount - 1) / maxCount
+            val bar = "■".repeat(filled) + "□".repeat(POLL_BAR_SEGMENTS - filled)
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                MessageBodyText(
+                    text = "▸ $option",
+                    lighten = true,
+                    align = bodyAlign,
+                    modifier = Modifier.weight(1f),
+                )
+                MessageBodyText(
+                    text = "$bar $count",
+                    lighten = true,
+                    align = TextAlign.End,
+                    monospace = true,
+                    maxLines = 1,
+                    modifier = Modifier.width(POLL_TALLY_COLUMN_WIDTH),
+                )
+            }
+        }
     }
 }
 
@@ -1214,9 +1246,19 @@ private fun MessageBodyText(
     align: TextAlign = TextAlign.Start,
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
+    // Same fixed-width-column reasoning as AudioMessageRow's duration text:
+    // a proportional font's per-glyph widths (e.g. digit "1" vs "0", or a
+    // bar's filled "■" vs empty "□") aren't guaranteed equal, so two rows
+    // with different values don't line up. Monospace makes every glyph the
+    // same width, which combined with a fixed-width Modifier (the caller's
+    // job) keeps a column of these aligned regardless of content.
+    monospace: Boolean = false,
 ) {
-    val style = scaledStyle(LightThemeTokens.typography.copy, MESSAGE_FONT_SCALE, MESSAGE_LINE_HEIGHT_MULTIPLIER)
+    var style = scaledStyle(LightThemeTokens.typography.copy, MESSAGE_FONT_SCALE, MESSAGE_LINE_HEIGHT_MULTIPLIER)
         .copy(textAlign = align)
+    if (monospace) {
+        style = style.copy(fontFamily = FontFamily.Monospace)
+    }
     Text(
         text = text,
         modifier = modifier,
