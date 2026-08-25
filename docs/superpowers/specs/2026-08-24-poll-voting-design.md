@@ -118,7 +118,6 @@ toggling an option sends the new complete selection immediately.
   PollTallyRows(
       options = message.pollOptions,
       votes = message.pollVotes,
-      selectableCount = message.pollSelectableCount,
       ownSelection = message.pollVotes.firstOrNull { it.fromMe }?.selectedOptions ?: emptyList(),
       onToggle = { index -> onTogglePollOption(message, index) },
       bodyAlign = bodyAlign,
@@ -154,11 +153,15 @@ toggling an option sends the new complete selection immediately.
 
 ## Testing
 
-- Go: unit-test `handleSendPollVote` — first vote, vote replacement
-  (send again with a different set), retract (empty set), target
-  message not found, target message not a poll, matching the existing
-  `handleSendReaction`/`handlePollVote` test coverage style in
-  `core/main_test.go`.
+- Go: `handleSendPollVote` itself isn't directly unit-tested — it needs
+  a live `*whatsmeow.Client`, the same reason its model,
+  `handleSendReaction`, has no direct test in `core/main_test.go`
+  either (confirmed: no `TestHandleSendReaction` exists). The one new
+  piece of pure logic it introduces — mapping selected indices to
+  option-name strings for `BuildPollVote` — gets its own unit test
+  (`pollVoteOptionNames`), matching the existing coverage style for
+  `matchPollVoteOptions` (its inverse) and `applyPollVote` (both
+  already tested).
 - Manual end-to-end, per [[feedback_device_testing_self_chat_only]]:
   self-chat or a second test account — vote on a poll and confirm the
   tally updates live (own row's checkbox flips, bar/count update);
