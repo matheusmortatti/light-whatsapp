@@ -613,6 +613,8 @@ git commit -m "feat(app): vote on polls via inline checkboxes"
 
 **Files:** none (manual verification only).
 
+**Post-implementation note:** the final whole-branch review (commit `3d94295`, on top of Task 5's `2f4d4d5`) found and fixed 3 issues not caught by any task-scoped review: voting on a poll *you* created failed deterministically (`reactionSenderJID`'s `EmptyJID`-for-`FromMe` sentinel doesn't carry over to `BuildPollVote`, which needs a real JID as a secret-store lookup key — fixed by overriding `sender` to your own JID in that case); a failed vote-build used to dump the whole UI into an unrecoverable full-screen error (now log-only, matching `handlePollVote`'s treatment of the symmetric decrypt-failure case); and `pollSelectableCount == 0` (WhatsApp's own "unlimited" sentinel, wire-indistinguishable from the field being absent) silently disabled voting forever (now falls back to the poll's option count). Steps 9-10 below cover the first two; the `takeIf { it > 0 }` fallback is exercised naturally by any real "allow multiple answers" poll in Step 5.
+
 - [ ] **Step 1: Build and install the debug APK**
 
 Run: `cd "/Users/matheusmortatti/git/Light Phone Apps/WhatsApp" && core/build_android.sh && ./gradlew :app:installDebug` (or the emulator/device flow already documented in `PROJECT.md`/prior feature memories — use whichever this repo's current dev setup expects).
@@ -658,3 +660,17 @@ Verify: no reaction picker opens (this is the expected, intentional trade-off �
 Tap a text message.
 
 Verify: the reaction picker still opens as before.
+
+- [ ] **Step 9: Vote on a poll you created yourself**
+
+From this app (or note: creating a poll from this app is out of scope — send the poll from a second device/WhatsApp Web on the *same* account you're logged into on the LP3, so it's a `FromMe` poll from this app's perspective), vote on it from this app.
+
+Verify: the vote succeeds (checkbox fills in, tally updates) — this is the exact path the final-review fix (`3d94295`) addressed; prior to that fix this would have failed every time.
+
+- [ ] **Step 10: Confirm a routine vote-build failure doesn't break the UI**
+
+Hard to force directly, but worth a light check: if any vote tap ever produces no visible effect and no crash (rather than dumping you to a full-screen error), that's the intended log-only behavior for a `BuildPollVote` failure (e.g. secret key never seen for a history-synced poll) — check `adb logcat` for a `send_poll_vote: failed to build vote for ...` warning if you want to confirm the no-op path fired rather than nothing happening at all.
+
+- [ ] **Step 11: Note the real `poll_selectable_count` for a WhatsApp "Allow multiple answers" poll**
+
+While testing Step 5, if you can inspect core's logs or the JSON `messages`/`message_update` event for that poll, note whether `poll_selectable_count` actually arrives as `0` (as the final review hypothesized `BuildPollCreation` would send for "unlimited") or as the real option count. Either way voting should work (Step 5's fallback handles both), but this settles an open question the spec previously got wrong (`pollSelectableCount` is *not* reliably ≥ 1 — see the corrected note in the spec's Design section) and is worth confirming for the record.

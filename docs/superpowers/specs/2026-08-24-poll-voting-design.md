@@ -140,11 +140,20 @@ toggling an option sends the new complete selection immediately.
     add it.
   - Else (already at the cap and tapping a new, unselected option):
     ignored — no-op, no command sent. The user must deselect one first.
-    (`pollSelectableCount` is always ≥ 1, so a single-select poll's
-    "tap a different option" is naturally covered: at cap 1, tapping a
-    new option is a no-op — matches native WhatsApp single-choice
-    behavior of needing to deselect first, and keeps the toggle rule
-    uniform across select-count instead of special-casing
+    (Corrected post-final-review: `pollSelectableCount` is *not*
+    reliably ≥ 1 — `BuildPollCreation` normalizes an invalid count to
+    `0`, and `0` is indistinguishable on the wire from the field being
+    absent, so a WhatsApp "allow multiple answers" poll may well arrive
+    as `0`. The cap passed to the toggle logic is
+    `message.pollSelectableCount.takeIf { it > 0 } ?: message.pollOptions.size`
+    — treating `0` as "no limit" — computed at the call site, not
+    inside `nextPollSelection` itself, which keeps its own cap == 0 ==
+    "nothing selectable" behavior intentional and tested. With a real
+    cap ≥ 1, a single-select poll's "tap a different option" is still
+    naturally covered: at cap 1, tapping a new option is a no-op —
+    matches native WhatsApp single-choice behavior of needing to
+    deselect first, and keeps the toggle rule uniform across
+    select-count instead of special-casing
     single-select as "replace.")
   - In every non-no-op case, call `onSendPollVote(message.id, newSelection)`
     immediately — full replacement set, no confirm step.
