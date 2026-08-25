@@ -129,6 +129,7 @@ private fun QrLoginScreen(viewModel: QrLoginViewModel = viewModel()) {
             onSend = viewModel::sendMessage,
             onSendAudio = viewModel::sendAudio,
             onSendReaction = viewModel::sendReaction,
+            onSendPollVote = viewModel::sendPollVote,
         )
         else -> ChatListScreen(chats = chats, syncing = syncing, onChatClick = viewModel::openChat)
     }
@@ -324,6 +325,7 @@ private fun ChatDetailScreen(
     onSend: (String) -> Unit,
     onSendAudio: (String, Long) -> Unit,
     onSendReaction: (String, String) -> Unit,
+    onSendPollVote: (String, List<Int>) -> Unit,
 ) {
     val context = LocalContext.current
 
@@ -583,6 +585,11 @@ private fun ChatDetailScreen(
                             showStatus = showStatus,
                             onPlayVideo = { path, loop -> playingVideo = path to loop },
                             onReact = { reactingTo = it },
+                            onTogglePollOption = { message, index ->
+                                val current = message.pollVotes.firstOrNull { it.fromMe }?.selectedOptions ?: emptyList()
+                                val next = nextPollSelection(current, index, message.pollSelectableCount)
+                                if (next != current) onSendPollVote(message.id, next)
+                            },
                             modifier = Modifier.padding(
                                 start = 24.dp,
                                 end = 24.dp,
@@ -940,16 +947,20 @@ private fun MessageRow(
     showStatus: Boolean,
     onPlayVideo: (path: String, loop: Boolean) -> Unit,
     onReact: (Message) -> Unit,
+    onTogglePollOption: (Message, Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val bodyAlign = if (message.fromMe) TextAlign.End else TextAlign.Start
+    // Deliberately on the outer Column, so the tap target includes the
+    // sender/time header rather than just the body below — a bigger tap
+    // target, and the header has no competing action of its own. Skipped
+    // for polls: voting (via PollTallyRows' own per-option tap targets) is
+    // a poll bubble's tap-driven action instead of reacting.
+    val outerModifier = modifier.fillMaxWidth().let {
+        if (message.type == "poll") it else it.lightClickable { onReact(message) }
+    }
     Column(
-        // Deliberately on the outer Column, so the tap target includes the
-        // sender/time header rather than just the body below — a bigger tap
-        // target, and the header has no competing action of its own.
-        modifier = modifier
-            .fillMaxWidth()
-            .lightClickable { onReact(message) },
+        modifier = outerModifier,
         horizontalAlignment = if (message.fromMe) Alignment.End else Alignment.Start,
     ) {
         // Header (sender + time) is skipped for messages clustered with the
@@ -1098,7 +1109,14 @@ private fun MessageRow(
             "poll" -> {
                 MessageBodyText(text = message.text, align = bodyAlign)
                 if (message.pollOptions.isNotEmpty()) {
-                    PollTallyRows(options = message.pollOptions, votes = message.pollVotes, bodyAlign = bodyAlign)
+                    val ownSelection = message.pollVotes.firstOrNull { it.fromMe }?.selectedOptions ?: emptyList()
+                    PollTallyRows(
+                        options = message.pollOptions,
+                        votes = message.pollVotes,
+                        ownSelection = ownSelection,
+                        onToggle = { index -> onTogglePollOption(message, index) },
+                        bodyAlign = bodyAlign,
+                    )
                     val voterCount = message.pollVotes.size
                     ChatMetaText(text = if (voterCount == 1) "1 vote" else "$voterCount votes")
                 }
@@ -1170,7 +1188,13 @@ private val POLL_TALLY_COLUMN_WIDTH = 110.dp
 // what isn't shown, matching the approved tally format (counts + bar, not
 // per-voter identity).
 @Composable
-private fun PollTallyRows(options: List<String>, votes: List<PollVote>, bodyAlign: TextAlign) {
+private fun PollTallyRows(
+    options: List<String>,
+    votes: List<PollVote>,
+    ownSelection: List<Int>,
+    onToggle: (Int) -> Unit,
+    bodyAlign: TextAlign,
+) {
     val counts = IntArray(options.size)
     for (vote in votes) {
         for (index in vote.selectedOptions) {
@@ -1183,9 +1207,15 @@ private fun PollTallyRows(options: List<String>, votes: List<PollVote>, bodyAlig
             val count = counts[i]
             val filled = if (maxCount == 0) 0 else (count * POLL_BAR_SEGMENTS + maxCount - 1) / maxCount
             val bar = "■".repeat(filled) + "□".repeat(POLL_BAR_SEGMENTS - filled)
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            val marker = if (i in ownSelection) "☑" else "☐"
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .lightClickable { onToggle(i) },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 MessageBodyText(
-                    text = "▸ $option",
+                    text = "$marker $option",
                     lighten = true,
                     align = bodyAlign,
                     modifier = Modifier.weight(1f),
