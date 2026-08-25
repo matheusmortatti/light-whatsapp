@@ -1763,10 +1763,24 @@ func handleSendPollVote(ctx context.Context, client *whatsmeow.Client, logger wa
 	// reactionSenderJID was designed for), it never treats EmptyJID as a
 	// "this is our own message" sentinel: it's used directly as a lookup
 	// key into the poll's stored secret, and whatsmeow stores a fromMe
-	// poll's secret under our own non-AD JID. Override
-	// reactionSenderJID's EmptyJID answer with that JID here.
+	// poll's secret under our own JID. Override reactionSenderJID's
+	// EmptyJID answer with that JID here.
+	//
+	// Must be our LID, not our PN (types.DefaultUserServer): whatsmeow's
+	// EncryptPollVote picks the vote's own encryption identity based on
+	// this exact field — it uses our LID by default, and only switches to
+	// our PN if pollInfo.Sender.Server == types.DefaultUserServer. This
+	// account is LID-addressed (chats and participants alike, confirmed
+	// on the wire), so a PN sender here flips the vote to encrypt under
+	// the wrong identity: it builds, sends, and locally applies without
+	// error, but every other device's decrypt silently fails (mirroring
+	// how this device treats its own decrypt failures — see
+	// handlePollVote) — the vote never actually appears anywhere but
+	// here. The secret lookup itself tolerates either form (the store
+	// matches LID/PN interchangeably via its own lid-map), so LID is
+	// correct for both roles here.
 	if target.FromMe {
-		sender = client.Store.GetJID().ToNonAD()
+		sender = client.Store.GetLID().ToNonAD()
 	}
 
 	pollInfo := &types.MessageInfo{
